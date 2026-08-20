@@ -1,0 +1,106 @@
+{
+	"info": {
+		"name": "English Review API",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "{{baseUrl}}"
+		}
+	],
+	"item": [
+		{
+			"name": "1. 注册用户",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"123456\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/auth/register",
+					"host": ["{{baseUrl}}"],
+					"path": ["api", "auth", "register"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "2. 登录（自动保存 Token）",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"// 判断响应是否成功",
+							"if (pm.response.code === 200 || pm.response.code === 201) {",
+							"    const response = pm.response.json();",
+							"    if (response.token) {",
+							"        // 将 Token 保存到环境变量中",
+							"        pm.environment.set('token', response.token);",
+							"        console.log('✅ Token 已自动保存！');",
+							"    }",
+							"} else {",
+							"    console.log('❌ 登录失败：', pm.response.text());",
+							"}"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"123456\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/auth/login",
+					"host": ["{{baseUrl}}"],
+					"path": ["api", "auth", "login"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "3. 添加句子（自动带 Token）",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"content\": \"I was wondering if you could help me.\",\n  \"translation\": \"不知道你是否可以帮我一下。\",\n  \"pronunciation\": \"aɪ wəz ˈwʌndərɪŋ ɪf ju kʊd hɛlp miː\",\n  \"notes\": \"很有礼貌的请求句式\",\n  \"source\": \"YouTube视频\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/sentences",
+					"host": ["{{baseUrl}}"],
+					"path": ["api", "sentences"]
+				}
+			},
+			"response": []
+		}
+	]
+}

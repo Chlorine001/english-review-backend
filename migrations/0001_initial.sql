@@ -1,4 +1,4 @@
--- 用户表
+-- 用户表（salt 和 password_hash 分开，因为我们要用 Web Crypto）
 CREATE TABLE users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT UNIQUE NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE sentences (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 复习记录表
+-- 复习记录表（含核心算法字段）
 CREATE TABLE reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sentence_id INTEGER NOT NULL,
@@ -40,6 +40,6 @@ CREATE TABLE reviews (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 索引（加速查询）
+-- 索引（加速查询，类似 MySQL 的 KEY）
 CREATE INDEX idx_reviews_user_next ON reviews(user_id, next_review_at);
 CREATE INDEX idx_sentences_user ON sentences(user_id);
