@@ -18,27 +18,46 @@ const app = new Hono<{ Bindings: Bindings }>();
 // 允许跨域（前端开发时要用）
 app.use('/*', cors());
 
+// 全局错误处理（必须放在所有路由之前）
+app.onError((err, c) => {
+  console.error('❌ Error:', err);
+  return c.json({ error: err.message || '服务器内部错误，请稍后重试！' }, 500);
+});
+
 // ---------- 注册（类似 @PostMapping("/register")） ----------
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
 });
+// const registerSchema = z.object({
+//   email: z.string().email({ message: '邮箱格式不正确!' }),
+//   password: z.string().min(6, { message: '密码长度至少为 6 个字符' }),
+// });
 
 app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => {
   const { email, password } = c.req.valid('json');
   const salt = generateSalt();
   const hash = await hashPassword(password, salt);
 
-  // 插入数据库，类似 JPA 的 save
-  const stmt = c.env.DB.prepare(
-    'INSERT INTO users (email, salt, password_hash) VALUES (?, ?, ?) RETURNING id'
-  );
-  const result = await stmt.bind(email, salt, hash).first<{ id: number }>();
-  if (!result) {
-    return c.json({ error: 'Email already exists' }, 400);
+  try {
+    const stmt = c.env.DB.prepare(
+      'INSERT INTO users (email, salt, password_hash) VALUES (?, ?, ?) RETURNING id'
+    );
+    const result = await stmt.bind(email, salt, hash).first<{ id: number }>();
+    if (!result) {
+      return c.json({ error: 'Registration failed' }, 500);
+    }
+    const token = await signJWT({ userId: result.id, email });
+    return c.json({ token, user: { id: result.id, email } });
+  } catch (err: any) {
+    // 捕获 UNIQUE 约束冲突（邮箱重复）
+    if (err.message && err.message.includes('UNIQUE constraint failed: users.email')) {
+      return c.json({ error: 'Email already exists' }, 400);
+    }
+    // 其他未知错误
+    console.error('Registration error:', err);
+    return c.json({ error: 'Internal server error' }, 500);
   }
-  const token = await signJWT({ userId: result.id, email });
-  return c.json({ token, user: { id: result.id, email } });
 });
 
 // ---------- 登录（类似 @PostMapping("/login")） ----------
@@ -48,11 +67,11 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     'SELECT id, email, salt, password_hash FROM users WHERE email = ?'
   ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string }>();
   if (!user) {
-    return c.json({ error: 'Invalid credentials' }, 401);
+    return c.json({ error: '用户不存在！请先注册！' }, 401);
   }
   const isValid = await verifyPassword(password, user.salt, user.password_hash);
   if (!isValid) {
-    return c.json({ error: 'Invalid credentials' }, 401);
+    return c.json({ error: '用户或密码不正确！' }, 401);
   }
   const token = await signJWT({ userId: user.id, email: user.email });
   return c.json({ token, user: { id: user.id, email: user.email } });
@@ -61,7 +80,7 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
 // ---------- 添加句子（需要认证） ----------
 app.post('/api/sentences', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
-  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+  if (!auth) return c.json({ error: '非法访问！' }, 401);
 
   const { content, translation, pronunciation, notes, source } = await c.req.json();
   if (!content) return c.json({ error: 'Content is required' }, 400);
@@ -71,7 +90,9 @@ app.post('/api/sentences', async (c) => {
     'INSERT INTO sentences (user_id, content, translation, pronunciation, notes, source) VALUES (?, ?, ?, ?, ?, ?) RETURNING id'
   );
   const result = await stmt.bind(auth.userId, content, translation || '', pronunciation || '', notes || '', source || '').first<{ id: number }>();
-
+  if (!result) {
+    return c.json({ error: '添加失败！' }, 500);
+  }
   // 同时创建初始复习记录（第一次学习）
   const now = new Date().toISOString();
   const reviewStmt = c.env.DB.prepare(
@@ -85,7 +106,7 @@ app.post('/api/sentences', async (c) => {
 // ---------- 获取今日复习队列 ----------
 app.get('/api/reviews/today', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
-  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+  if (!auth) return c.json({ error: '非法访问！' }, 401);
 
   const now = new Date().toISOString();
   const sql = `
@@ -103,7 +124,7 @@ app.get('/api/reviews/today', async (c) => {
 // ---------- 提交复习评价 ----------
 app.post('/api/reviews/:id/answer', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
-  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+  if (!auth) return c.json({ error: '非法访问！' }, 401);
 
   const reviewId = Number(c.req.param('id'));
   const { rating } = await c.req.json(); // 'again', 'hard', 'good', 'easy'
