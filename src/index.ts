@@ -8,9 +8,11 @@ import {
   signJWT, authenticate 
 } from './auth';
 
-// 类型声明：让 Hono 能识别我们的 D1 绑定
+// ---------- 扩展 Bindings 类型 ----------
 type Bindings = {
   DB: D1Database;
+  JWT_SECRET: string;
+  JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -47,7 +49,12 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
     if (!result) {
       return c.json({ error: 'Registration failed' }, 500);
     }
-    const token = await signJWT({ userId: result.id, email });
+    // ✅ 修改：传入 secret 和过期分钟数
+    const token = await signJWT(
+      { userId: result.id, email },
+      c.env.JWT_SECRET,
+      parseInt(c.env.JWT_EXPIRES_IN)
+    );
     return c.json({ token, user: { id: result.id, email } });
   } catch (err: any) {
     // 捕获 UNIQUE 约束冲突（邮箱重复）
@@ -60,7 +67,7 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
   }
 });
 
-// ---------- 登录（类似 @PostMapping("/login")） ----------
+// ---------- 登录 ----------
 app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   const { email, password } = c.req.valid('json');
   const user = await c.env.DB.prepare(
@@ -73,7 +80,12 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   if (!isValid) {
     return c.json({ error: '用户或密码不正确！' }, 401);
   }
-  const token = await signJWT({ userId: user.id, email: user.email });
+  // ✅ 修改：传入 secret 和过期分钟数
+  const token = await signJWT(
+    { userId: user.id, email: user.email },
+    c.env.JWT_SECRET,
+    parseInt(c.env.JWT_EXPIRES_IN)
+  );
   return c.json({ token, user: { id: user.id, email: user.email } });
 });
 

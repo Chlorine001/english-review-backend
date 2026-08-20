@@ -7,10 +7,6 @@ declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
 	}
-	interface Env extends __BaseEnv_Env {
-    JWT_EXPIRES_IN: any;
-    JWT_SECRET: string | undefined;
-}
 }
 interface Env extends __BaseEnv_Env {}
 
