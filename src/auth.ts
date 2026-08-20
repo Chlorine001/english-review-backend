@@ -1,6 +1,6 @@
 // src/auth.ts
 // 类比 Java 的 public class AuthUtils { ... }
-
+import { env } from 'cloudflare:workers';
 const encoder = new TextEncoder();
 
 // ============ 密码哈希（类似 BCrypt） ============
@@ -38,12 +38,13 @@ export async function verifyPassword(password: string, salt: string, hash: strin
 }
 
 // ============ JWT（类似 JJWT 或 java-jwt） ============
-const JWT_SECRET = encoder.encode('your-secret-key-change-in-production'); // 生产环境用环境变量
-
+// const JWT_SECRET = encoder.encode('your-secret-key-change-in-production'); // 生产环境用环境变量
+const JWT_SECRET = encoder.encode(env.JWT_SECRET);
+const time = env.JWT_EXPIRES_IN;
 export async function signJWT(payload: { userId: number; email: string }): Promise<string> {
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
-  const data = { ...payload, iat: now, exp: now + 7 * 24 * 60 * 60 };
+  const data = { ...payload, iat: now, exp: now + time * 60};
 
   const headerB64 = btoa(JSON.stringify(header));
   const payloadB64 = btoa(JSON.stringify(data));
