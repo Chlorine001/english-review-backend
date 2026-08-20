@@ -220,4 +220,77 @@ app.get('/api/stats', async (c) => {
   });
 });
 
+// ---------- 获取所有句子（支持搜索和排序） ----------
+app.get('/api/sentences', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const url = new URL(c.req.url);
+  const search = url.searchParams.get('search') || '';
+  const sort = url.searchParams.get('sort') || 'created_at_desc';
+
+  let sql = 'SELECT * FROM sentences WHERE user_id = ?';
+  const params: any[] = [auth.userId];
+
+  if (search) {
+    sql += ' AND content LIKE ?';
+    params.push(`%${search}%`);
+  }
+
+  // 排序处理
+  switch (sort) {
+    case 'created_at_asc':
+      sql += ' ORDER BY created_at ASC';
+      break;
+    case 'content_asc':
+      sql += ' ORDER BY content ASC';
+      break;
+    case 'content_desc':
+      sql += ' ORDER BY content DESC';
+      break;
+    default:
+      sql += ' ORDER BY created_at DESC';
+  }
+
+  const { results } = await c.env.DB.prepare(sql).bind(...params).all();
+  return c.json(results);
+});
+
+// ---------- 更新句子 ----------
+app.put('/api/sentences/:id', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const id = Number(c.req.param('id'));
+  const { content, translation, pronunciation, notes, source } = await c.req.json();
+
+  // 先验证该句子属于当前用户
+  const check = await c.env.DB.prepare('SELECT id FROM sentences WHERE id = ? AND user_id = ?')
+    .bind(id, auth.userId).first();
+  if (!check) return c.json({ error: 'Sentence not found' }, 404);
+
+  await c.env.DB.prepare(`
+    UPDATE sentences
+    SET content = ?, translation = ?, pronunciation = ?, notes = ?, source = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(content, translation || '', pronunciation || '', notes || '', source || '', id).run();
+
+  return c.json({ success: true });
+});
+
+// ---------- 删除句子 ----------
+app.delete('/api/sentences/:id', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const id = Number(c.req.param('id'));
+  // 验证权限（同时删句子和关联的复习记录，因为外键级联删除）
+  const check = await c.env.DB.prepare('SELECT id FROM sentences WHERE id = ? AND user_id = ?')
+    .bind(id, auth.userId).first();
+  if (!check) return c.json({ error: 'Sentence not found' }, 404);
+
+  await c.env.DB.prepare('DELETE FROM sentences WHERE id = ?').bind(id).run();
+  return c.json({ success: true });
+});
+
 export default app;
