@@ -3,9 +3,9 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import { 
-  generateSalt, hashPassword, verifyPassword, 
-  signJWT, authenticate 
+import {
+  generateSalt, hashPassword, verifyPassword,
+  signJWT, authenticate
 } from './auth';
 
 // ---------- 扩展 Bindings 类型 ----------
@@ -15,10 +15,21 @@ type Bindings = {
   JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Bindings }>().basePath('/api');
 
-// 允许跨域（前端开发时要用）
-app.use('/*', cors());
+// 只允许你的前端域名和本地开发环境
+app.use('/*', cors({
+  origin: (origin) => {
+    // 生产前端域名
+    if (origin === 'https://lexiscribe.cdragon.win') return origin;
+    // 本地开发（可选）
+    if (origin && (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:'))) return origin;
+    return null; // 拒绝其他来源
+  },
+  allowHeaders: ['Content-Type', 'Authorization'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: true,
+}));
 
 // 全局错误处理（必须放在所有路由之前）
 app.onError((err, c) => {
@@ -46,8 +57,9 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       'INSERT INTO users (email, salt, password_hash) VALUES (?, ?, ?) RETURNING id'
     );
     const result = await stmt.bind(email, salt, hash).first<{ id: number }>();
-    if (!result) {
-      return c.json({ error: 'Registration failed' }, 500);
+    // 防止返回了空对象或字符串类型的 id
+    if (!result || typeof result.id !== 'number') {
+      return c.json({ error: '非法注册！' }, 500);
     }
     // ✅ 修改：传入 secret 和过期分钟数
     const token = await signJWT(
@@ -56,14 +68,19 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       parseInt(c.env.JWT_EXPIRES_IN)
     );
     return c.json({ token, user: { id: result.id, email } });
+    // // 修改为（只返回成功信息，不返回 token）
+    // return c.json({
+    //   success: true,
+    //   message: '注册成功，请前往登录'
+    // }, 201);
   } catch (err: any) {
     // 捕获 UNIQUE 约束冲突（邮箱重复）
-    if (err.message && err.message.includes('UNIQUE constraint failed: users.email')) {
-      return c.json({ error: 'Email already exists' }, 400);
+    if (err?.message?.includes('UNIQUE constraint failed')) {
+      return c.json({ error: '用户已存在，请直接登录！' }, 409);
     }
     // 其他未知错误
     console.error('Registration error:', err);
-    return c.json({ error: 'Internal server error' }, 500);
+    return c.json({ error: '未知错误！请联系管理员！' }, 500);
   }
 });
 
@@ -81,10 +98,11 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     return c.json({ error: '用户或密码不正确！' }, 401);
   }
   // ✅ 修改：传入 secret 和过期分钟数
+  const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
   const token = await signJWT(
     { userId: user.id, email: user.email },
     c.env.JWT_SECRET,
-    parseInt(c.env.JWT_EXPIRES_IN)
+    expiresInMinutes
   );
   return c.json({ token, user: { id: user.id, email: user.email } });
 });

@@ -1,6 +1,24 @@
 // src/auth.ts
 const encoder = new TextEncoder();
 
+// Base64URL 工具函数
+function base64UrlEncode(data: string | Uint8Array): string {
+  let base64: string;
+  if (typeof data === 'string') {
+    base64 = btoa(data);
+  } else {
+    // 注意：如果数据量极大，扩展运算符(...)有性能风险，但 JWT 签名只有 32 字节，安全
+    base64 = btoa(String.fromCharCode(...new Uint8Array(data)));
+  }
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlDecode(str: string): string {
+  // 还原填充
+  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4) base64 += '=';
+  return atob(base64);
+}
 // ============ 密码哈希 ============
 export function generateSalt(): string {
   const buffer = crypto.getRandomValues(new Uint8Array(16));
@@ -45,8 +63,8 @@ export async function signJWT(
   const now = Math.floor(Date.now() / 1000);
   const data = { ...payload, iat: now, exp: now + expiresInMinutes * 60 };
 
-  const headerB64 = btoa(JSON.stringify(header));
-  const payloadB64 = btoa(JSON.stringify(data));
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(data));
   const toSign = `${headerB64}.${payloadB64}`;
 
   const key = await crypto.subtle.importKey(
@@ -57,8 +75,7 @@ export async function signJWT(
     ['sign']
   );
   const sigBuffer = await crypto.subtle.sign('HMAC', key, encoder.encode(toSign));
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
-
+  const sigB64 = base64UrlEncode(new Uint8Array(sigBuffer));
   return `${toSign}.${sigB64}`;
 }
 
