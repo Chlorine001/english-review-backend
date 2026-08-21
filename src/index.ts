@@ -15,7 +15,7 @@ type Bindings = {
   JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
 };
 
-const app = new Hono<{ Bindings: Bindings }>().basePath('/api');
+const app = new Hono<{ Bindings: Bindings }>();
 
 // 只允许你的前端域名和本地开发环境
 app.use('/*', cors({
