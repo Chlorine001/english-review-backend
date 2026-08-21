@@ -14,14 +14,9 @@ function base64UrlEncode(data: string | Uint8Array): string {
 }
 
 function base64UrlDecode(str: string): string {
-  // 1. 将 '-' 替换为 '+'，将 '_' 替换为 '/'
+  // 还原填充
   let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  // 2. 补齐末尾的 '='（使长度成为 4 的倍数）
-  const pad = base64.length % 4;
-  if (pad) {
-    base64 += '='.repeat(4 - pad);
-  }
-  // 3. 现在可以安全解码
+  while (base64.length % 4) base64 += '=';
   return atob(base64);
 }
 // ============ 密码哈希 ============
@@ -99,7 +94,7 @@ export async function verifyJWT(
     false,
     ['verify']
   );
-  const sigBuffer = Uint8Array.from(atob(sigB64), c => c.charCodeAt(0));
+  const sigBuffer = Uint8Array.from(base64UrlDecode(sigB64), c => c.charCodeAt(0));
   const isValid = await crypto.subtle.verify(
     'HMAC',
     key,
