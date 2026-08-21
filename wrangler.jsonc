@@ -11,14 +11,14 @@
 		"enabled": true,
 	},
 	"upload_source_maps": true,
-	"d1_databases": [
-		{
-			"binding": "DB",
-			"database_name": "english-review-local",
-			"database_id": "00000000-0000-0000-0000-000000000000",
-			"preview_database_id": "english-review-local",
-		},
-	],
+	// "d1_databases": [
+	// 	{
+	// 		"binding": "DB",
+	// 		"database_name": "english-review-local",
+	// 		"database_id": "00000000-0000-0000-0000-000000000000",
+	// 		"preview_database_id": "english-review-local",
+	// 	},
+	// ],
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
