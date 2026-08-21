@@ -48,7 +48,7 @@
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
-	"vars": { "JWT_SECRET": "gem19910816_chlorine001", "JWT_EXPIRES_IN": "1" },
+	"vars": { "JWT_SECRET": "gem19910816_chlorine001", "JWT_EXPIRES_IN": "180" },
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
