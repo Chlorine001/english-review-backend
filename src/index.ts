@@ -37,6 +37,11 @@ app.onError((err, c) => {
   return c.json({ error: err.message || '服务器内部错误，请稍后重试！' }, 500);
 });
 
+// 健康检查 & 根路径
+app.get('/', (c) => {
+  return c.json({ status: 'ok', message: '✅ API服务运行正常！' });
+});
+
 // ---------- 注册（类似 @PostMapping("/register")） ----------
 const registerSchema = z.object({
   email: z.string().email(),
