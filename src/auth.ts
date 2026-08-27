@@ -113,11 +113,27 @@ export async function verifyJWT(
 export async function authenticate(
   request: Request,
   env: { JWT_SECRET: string }
-): Promise<{ userId: number } | null> {
+): Promise<{ userId: number, email: string } | null> {
+  // 1. 从 Authorization Header 取（API 调用）
   const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  const token = authHeader.slice(7);
-  const payload = await verifyJWT(token, env.JWT_SECRET);
-  if (!payload) return null;
-  return { userId: payload.userId };
+  let token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  // 2. 如果 Header 没有，从 Cookie 取（audio 标签等）
+  if (!token) {
+    const cookieHeader = request.headers.get('Cookie');
+    if (cookieHeader) {
+      const cookies = Object.fromEntries(
+        cookieHeader.split('; ').map(c => c.split('='))
+      );
+      token = cookies['token'] || null;
+    }
+  }
+
+  if (!token) return null;
+
+  try {
+    const payload = await verifyJWT(token, env.JWT_SECRET);
+    return { userId: payload.userId, email: payload.email };
+  } catch {
+    return null;
+  }
 }
