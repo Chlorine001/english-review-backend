@@ -406,7 +406,7 @@ app.post('/api/sentences/:id/audio', async (c) => {
     'UPDATE sentences SET audio_path = ?, audio_format = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
   ).bind(path, ext, id).run();
 
-  return c.json({ success: true, key: path });
+  return c.json({ success: true, path: path });
 });
 
 
