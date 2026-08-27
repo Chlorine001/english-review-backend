@@ -13,6 +13,7 @@ type Bindings = {
   DB: D1Database;
   JWT_SECRET: string;
   JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
+  R2_BUCKET: R2Bucket;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -30,6 +31,24 @@ app.use('/*', cors({
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
 }));
+
+// app.use('/*', cors({
+//   origin: '*',
+//   allowHeaders: ['Content-Type', 'Authorization'],
+//   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+// }));
+
+// app.options('/*', (c) => {
+//   return new Response(null, {
+//     status: 204,
+//     headers: {
+//       'Access-Control-Allow-Origin': '*',
+//       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+//       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+//       'Access-Control-Max-Age': '86400',
+//     },
+//   });
+// });
 
 // 全局错误处理（必须放在所有路由之前）
 app.onError((err, c) => {
@@ -72,12 +91,17 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       c.env.JWT_SECRET,
       parseInt(c.env.JWT_EXPIRES_IN)
     );
-    return c.json({ token, user: { id: result.id, email } });
-    // // 修改为（只返回成功信息，不返回 token）
-    // return c.json({
-    //   success: true,
-    //   message: '注册成功，请前往登录'
-    // }, 201);
+    // ✅ 修改：传入 secret 和过期分钟数
+    const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
+    // 返回 JSON 同时设置 HttpOnly Cookie
+    return c.json(
+      { user: { id: result.id, email } },
+      {
+        headers: {
+          'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
+        },
+      }
+    );
   } catch (err: any) {
     // 捕获 UNIQUE 约束冲突（邮箱重复）
     if (err?.message?.includes('UNIQUE constraint failed')) {
@@ -109,7 +133,30 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     c.env.JWT_SECRET,
     expiresInMinutes
   );
-  return c.json({ token, user: { id: user.id, email: user.email } });
+  // 返回 JSON 同时设置 HttpOnly Cookie
+  return c.json(
+    { user: { id: user.id, email: user.email } },
+    {
+      headers: {
+        'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
+      },
+    }
+  );
+});
+
+app.post('/api/auth/logout', async (c) => {
+  // 即使没有携带有效 token，也清除 Cookie（无状态注销）
+  // 但如果你希望只有登录用户才能注销，可以调用 authenticate
+  // 这里直接清除 Cookie 即可
+
+  return c.json(
+    { success: true, message: '已退出登录' },
+    {
+      headers: {
+        'Set-Cookie': 'token=; HttpOnly; Path=/; Max-Age=0; SameSite=None; Secure',
+      },
+    }
+  );
 });
 
 // ---------- 添加句子（需要认证） ----------
@@ -327,5 +374,41 @@ app.delete('/api/sentences/:id', async (c) => {
   await c.env.DB.prepare('DELETE FROM sentences WHERE id = ?').bind(id).run();
   return c.json({ success: true });
 });
+
+app.post('/api/sentences/:id/audio', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const id = Number(c.req.param('id'));
+  // 验证句子属于当前用户
+  const sentence = await c.env.DB.prepare('SELECT user_id FROM sentences WHERE id = ?').bind(id).first();
+  if (!sentence || sentence.user_id !== auth.userId) return c.json({ error: 'Not found' }, 404);
+
+  const formData = await c.req.formData();
+  const file = formData.get('audio') as File;
+  if (!file) return c.json({ error: 'No audio file' }, 400);
+
+  // 生成path
+  const ext = file.name.split('.').pop() || 'mp3';
+  const path = `sentences/${id}.${ext}`;
+
+  // 上传到 R2
+  const arrayBuffer = await file.arrayBuffer();
+  await c.env.R2_BUCKET.put(path, arrayBuffer, {
+    httpMetadata: { contentType: file.type || 'audio/mpeg' },
+  });
+
+  // 获取时长（可用第三方库，简化：由前端传入或后续解析）
+  // 此处让前端在 upload 后回传 duration，或使用 ffmpeg 在 Worker 中解析（消耗 CPU，不推荐）
+
+  // 更新数据库
+  await c.env.DB.prepare(
+    'UPDATE sentences SET audio_path = ?, audio_format = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+  ).bind(path, ext, id).run();
+
+  return c.json({ success: true, key: path });
+});
+
+
 
 export default app;
