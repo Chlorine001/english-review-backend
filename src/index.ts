@@ -372,6 +372,7 @@ app.post('/api/sentences/:id/audio', async (c) => {
   if (!file) return c.json({ error: 'No audio file' }, 400);
 
   // 生成path
+  const originalName = file.name; // 获取原始文件名
   const ext = file.name.split('.').pop() || 'mp3';
   const path = `sentences/${id}.${ext}`;
 
@@ -386,10 +387,10 @@ app.post('/api/sentences/:id/audio', async (c) => {
 
   // 更新数据库
   await c.env.DB.prepare(
-    'UPDATE sentences SET audio_path = ?, audio_format = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-  ).bind(path, ext, id).run();
+    'UPDATE sentences SET audio_path = ?, audio_format = ?, audio_original_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+  ).bind(path, ext, originalName, id).run();
 
-  return c.json({ success: true, path: path });
+  return c.json({ success: true, path: path, originalName: originalName });
 });
 
 app.get('/api/sentences/:id/audio', async (c) => {
@@ -417,6 +418,28 @@ app.get('/api/sentences/:id/audio', async (c) => {
 
   // 直接返回完整流，不处理 Range
   return new Response(object.body, { status: 200, headers });
+});
+
+// ---------- 删除音频 ----------
+app.delete('/api/sentences/:id/audio', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const id = Number(c.req.param('id'));
+  // 1. 验证句子归属
+  const sentence = await c.env.DB.prepare('SELECT audio_path FROM sentences WHERE id = ? AND user_id = ?')
+    .bind(id, auth.userId).first<{ audio_path: string }>();
+  if (!sentence) return c.json({ error: 'Sentence not found' }, 404);
+  if (!sentence.audio_path) return c.json({ error: 'No audio to delete' }, 404);
+
+  // 2. 从 R2 删除文件
+  await c.env.R2_BUCKET.delete(sentence.audio_path);
+
+  // 3. 清空数据库字段
+  await c.env.DB.prepare('UPDATE sentences SET audio_path = NULL, audio_duration = NULL, audio_format = NULL WHERE id = ?')
+    .bind(id).run();
+
+  return c.json({ success: true });
 });
 
 export default app;
