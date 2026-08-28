@@ -32,24 +32,6 @@ app.use('/*', cors({
   credentials: true,
 }));
 
-// app.use('/*', cors({
-//   origin: '*',
-//   allowHeaders: ['Content-Type', 'Authorization'],
-//   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-// }));
-
-// app.options('/*', (c) => {
-//   return new Response(null, {
-//     status: 204,
-//     headers: {
-//       'Access-Control-Allow-Origin': '*',
-//       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-//       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-//       'Access-Control-Max-Age': '86400',
-//     },
-//   });
-// });
-
 // 全局错误处理（必须放在所有路由之前）
 app.onError((err, c) => {
   console.error('❌ Error:', err);
@@ -375,6 +357,7 @@ app.delete('/api/sentences/:id', async (c) => {
   return c.json({ success: true });
 });
 
+//上传音频
 app.post('/api/sentences/:id/audio', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
@@ -409,6 +392,31 @@ app.post('/api/sentences/:id/audio', async (c) => {
   return c.json({ success: true, path: path });
 });
 
+app.get('/api/sentences/:id/audio', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
+  const id = Number(c.req.param('id'));
+  const sentence = await c.env.DB.prepare(
+    'SELECT audio_path FROM sentences WHERE id = ? AND user_id = ?'
+  ).bind(id, auth.userId).first<{ audio_path: string }>();
+
+  if (!sentence || !sentence.audio_path) {
+    return c.json({ error: 'Audio not found' }, 404);
+  }
+
+  const object = await c.env.R2_BUCKET.get(sentence.audio_path);
+  if (!object) {
+    return c.json({ error: 'File missing' }, 404);
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set('Content-Type', 'audio/mpeg');
+  headers.set('Cache-Control', 'public, max-age=86400');
+
+  // 直接返回完整流，不处理 Range
+  return new Response(object.body, { status: 200, headers });
+});
 
 export default app;
