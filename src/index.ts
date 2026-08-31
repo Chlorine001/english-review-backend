@@ -293,31 +293,58 @@ app.get('/api/sentences', async (c) => {
   const search = url.searchParams.get('search') || '';
   const sort = url.searchParams.get('sort') || 'created_at_desc';
 
-  let sql = 'SELECT * FROM sentences WHERE user_id = ?';
+  // 分页参数（前端默认 page=1, limit=20）
+  const page = parseInt(url.searchParams.get('page') || '1', 10);
+  const limit = parseInt(url.searchParams.get('limit') || '20', 10);
+  const offset = (page - 1) * limit;
+
+  // 基础查询条件（始终包含 user_id）
+  let whereClause = 'WHERE user_id = ?';
   const params: any[] = [auth.userId];
 
   if (search) {
-    sql += ' AND content LIKE ?';
+    whereClause += ' AND content LIKE ?';
     params.push(`%${search}%`);
   }
 
-  // 排序处理
+  // 排序逻辑
+  let orderClause = '';
   switch (sort) {
     case 'created_at_asc':
-      sql += ' ORDER BY created_at ASC';
+      orderClause = 'ORDER BY created_at ASC';
       break;
     case 'content_asc':
-      sql += ' ORDER BY content ASC';
+      orderClause = 'ORDER BY content ASC';
       break;
     case 'content_desc':
-      sql += ' ORDER BY content DESC';
+      orderClause = 'ORDER BY content DESC';
       break;
     default:
-      sql += ' ORDER BY created_at DESC';
+      orderClause = 'ORDER BY created_at DESC';
   }
 
-  const { results } = await c.env.DB.prepare(sql).bind(...params).all();
-  return c.json(results);
+  // 1. 查询总记录数（用于前端分页控件）
+  const countSql = `SELECT COUNT(*) AS total FROM sentences ${whereClause}`;
+  const countResult = await c.env.DB.prepare(countSql).bind(...params).first();
+  const total = countResult?.total || 0;
+
+  // 2. 查询分页数据
+  const dataSql = `
+    SELECT *
+    FROM sentences
+    ${whereClause}
+    ${orderClause}
+    LIMIT ? OFFSET ?
+  `;
+  // 注意：LIMIT 和 OFFSET 需要追加到参数列表末尾
+  const dataParams = [...params, limit, offset];
+  const { results } = await c.env.DB.prepare(dataSql).bind(...dataParams).all();
+
+  // 返回前端期望的格式
+  return c.json({
+    data: results,
+    total: total,
+  });
 });
 
 // ---------- 更新句子 ----------
