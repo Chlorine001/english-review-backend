@@ -8,12 +8,19 @@ import {
   signJWT, authenticate
 } from './auth';
 
+import {
+  ALLOWED_MEDIA_TYPES,
+  ALLOWED_MEDIA_EXTS,
+  DEFAULT_MAX_FILE_SIZE,
+} from './constants';
+
 // ---------- 扩展 Bindings 类型 ----------
 type Bindings = {
   DB: D1Database;
   JWT_SECRET: string;
   JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
   R2_BUCKET: R2Bucket;
+  MAX_FILE_SIZE?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -395,12 +402,20 @@ app.post('/api/sentences/:id/audio', async (c) => {
   if (!sentence || sentence.user_id !== auth.userId) return c.json({ error: 'Not found' }, 404);
 
   const formData = await c.req.formData();
-  const file = formData.get('audio') as File;
-  if (!file) return c.json({ error: 'No audio file' }, 400);
+  const file = formData.get('media') as File;
+  if (!file) return c.json({ error: 'No media file' }, 400);
+  const maxSize = Number(c.env.MAX_FILE_SIZE)|| DEFAULT_MAX_FILE_SIZE; // 环境变量-- Number(c.env.MAX_FILE_SIZE)
+
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (!ALLOWED_MEDIA_TYPES.includes(file.type) || !ext || !ALLOWED_MEDIA_EXTS.includes(ext)) {
+    return c.json({ error: `不支持的文件格式，仅支持: ${ALLOWED_MEDIA_EXTS.join(', ')}` }, 400);
+  }
+  if (file.size > maxSize) {
+    return c.json({ error: `文件大小不能超过 ${maxSize / 1024 / 1024}MB` }, 413);
+  }
 
   // 生成path
   const originalName = file.name; // 获取原始文件名
-  const ext = file.name.split('.').pop() || 'mp3';
   const path = `sentences/${id}.${ext}`;
 
   // 上传到 R2
