@@ -392,7 +392,7 @@ app.delete('/api/sentences/:id', async (c) => {
 });
 
 //上传音频
-app.post('/api/sentences/:id/audio', async (c) => {
+app.post('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
@@ -404,7 +404,7 @@ app.post('/api/sentences/:id/audio', async (c) => {
   const formData = await c.req.formData();
   const file = formData.get('media') as File;
   if (!file) return c.json({ error: 'No media file' }, 400);
-  const maxSize = Number(c.env.MAX_FILE_SIZE)|| DEFAULT_MAX_FILE_SIZE; // 环境变量-- Number(c.env.MAX_FILE_SIZE)
+  const maxSize = Number(c.env.MAX_FILE_SIZE) || DEFAULT_MAX_FILE_SIZE; // 环境变量-- Number(c.env.MAX_FILE_SIZE)
 
   const ext = file.name.split('.').pop()?.toLowerCase();
   if (!ALLOWED_MEDIA_TYPES.includes(file.type) || !ext || !ALLOWED_MEDIA_EXTS.includes(ext)) {
@@ -417,45 +417,59 @@ app.post('/api/sentences/:id/audio', async (c) => {
   // 生成path
   const originalName = file.name; // 获取原始文件名
   const path = `sentences/${id}.${ext}`;
-
+  const mimeMap: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    wav: 'audio/wav',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime',
+  };
   // 上传到 R2
   const arrayBuffer = await file.arrayBuffer();
   await c.env.R2_BUCKET.put(path, arrayBuffer, {
-    httpMetadata: { contentType: file.type || 'audio/mpeg' },
-  });
 
-  // 获取时长（可用第三方库，简化：由前端传入或后续解析）
-  // 此处让前端在 upload 后回传 duration，或使用 ffmpeg 在 Worker 中解析（消耗 CPU，不推荐）
+    httpMetadata: { contentType: mimeMap[ext || ''] || 'application/octet-stream' },
+  });
 
   // 更新数据库
   await c.env.DB.prepare(
-    'UPDATE sentences SET audio_path = ?, audio_format = ?, audio_original_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+    'UPDATE sentences SET media_path = ?, media_format = ?, media_original_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
   ).bind(path, ext, originalName, id).run();
 
   return c.json({ success: true, path: path, originalName: originalName });
 });
 
-app.get('/api/sentences/:id/audio', async (c) => {
+app.get('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
   const id = Number(c.req.param('id'));
   const sentence = await c.env.DB.prepare(
-    'SELECT audio_path FROM sentences WHERE id = ? AND user_id = ?'
-  ).bind(id, auth.userId).first<{ audio_path: string }>();
+    'SELECT media_path FROM sentences WHERE id = ? AND user_id = ?'
+  ).bind(id, auth.userId).first<{ media_path: string }>();
 
-  if (!sentence || !sentence.audio_path) {
-    return c.json({ error: 'Audio not found' }, 404);
+  if (!sentence || !sentence.media_path) {
+    return c.json({ error: 'Media not found' }, 404);
   }
 
-  const object = await c.env.R2_BUCKET.get(sentence.audio_path);
+  const object = await c.env.R2_BUCKET.get(sentence.media_path);
   if (!object) {
     return c.json({ error: 'File missing' }, 404);
   }
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
-  headers.set('Content-Type', 'audio/mpeg');
+  const ext = sentence.media_path?.split('.').pop()?.toLowerCase();
+  const mimeMap: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    wav: 'audio/wav',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime',
+  };
+  headers.set('Content-Type', mimeMap[ext || ''] || 'application/octet-stream');
   headers.set('Cache-Control', 'public, max-age=86400');
 
   // 直接返回完整流，不处理 Range
@@ -463,22 +477,22 @@ app.get('/api/sentences/:id/audio', async (c) => {
 });
 
 // ---------- 删除音频 ----------
-app.delete('/api/sentences/:id/audio', async (c) => {
+app.delete('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
   const id = Number(c.req.param('id'));
   // 1. 验证句子归属
-  const sentence = await c.env.DB.prepare('SELECT audio_path FROM sentences WHERE id = ? AND user_id = ?')
-    .bind(id, auth.userId).first<{ audio_path: string }>();
+  const sentence = await c.env.DB.prepare('SELECT media_path FROM sentences WHERE id = ? AND user_id = ?')
+    .bind(id, auth.userId).first<{ media_path: string }>();
   if (!sentence) return c.json({ error: 'Sentence not found' }, 404);
-  if (!sentence.audio_path) return c.json({ error: 'No audio to delete' }, 404);
+  if (!sentence.media_path) return c.json({ error: 'No media to delete' }, 404);
 
   // 2. 从 R2 删除文件
-  await c.env.R2_BUCKET.delete(sentence.audio_path);
+  await c.env.R2_BUCKET.delete(sentence.media_path);
 
   // 3. 清空数据库字段
-  await c.env.DB.prepare('UPDATE sentences SET audio_path = NULL, audio_duration = NULL, audio_format = NULL WHERE id = ?')
+  await c.env.DB.prepare('UPDATE sentences SET media_path = NULL, media_format = NULL, media_original_name = NULL WHERE id = ?')
     .bind(id).run();
 
   return c.json({ success: true });
