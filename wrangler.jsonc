@@ -58,6 +58,7 @@
 		"JWT_EXPIRES_IN": "1440",
 		"MAX_FILE_SIZE": "52428800",
 		"EMAIL_FROM": "verify@lexiscribe.cdragon.win",
+		"FRONTEND_URL": "https://lexiscribe.cdragon.win", // 生产环境
 	},
 	/**
 	 * Static Assets

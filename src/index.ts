@@ -24,6 +24,7 @@ type Bindings = {
   MAX_FILE_SIZE?: string;
   EMAIL_FROM: string;
   RESEND_API_KEY: string;
+  FRONTEND_URL: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -126,19 +127,30 @@ app.post('/api/auth/send-verification', async (c) => {
 
   // 发送邮件
   const resend = new Resend(c.env.RESEND_API_KEY);
+  const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:5173';
+  const verifyLink = `${frontendUrl}/verify-email?email=${encodeURIComponent(email)}`;
+
   await resend.emails.send({
     from: c.env.EMAIL_FROM,
     to: email,
     subject: 'LexiScribe 邮箱验证码',
     html: `
-      <div style="font-family: sans-serif; max-width: 400px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
-        <h2 style="color: #4f46e5;">✒️ LexiScribe</h2>
-        <p>请使用以下验证码完成邮箱验证：</p>
-        <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; text-align: center; background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
+      <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 16px; background: #ffffff;">
+        <h2 style="color: #4f46e5; font-size: 24px; margin-top: 0;">✒️ LexiScribe</h2>
+        <p style="font-size: 16px; color: #1f2937;">感谢注册 LexiScribe，请使用以下验证码完成邮箱验证：</p>
+        <div style="font-size: 40px; font-weight: bold; letter-spacing: 10px; text-align: center; background: #f3f4f6; padding: 16px 24px; border-radius: 12px; margin: 20px 0; color: #1f2937;">
           ${code}
         </div>
         <p style="color: #6b7280; font-size: 14px;">验证码有效期为 10 分钟，请尽快使用。</p>
-        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;" />
+        <p style="margin: 20px 0 10px;">
+          <a href="${verifyLink}" style="display: inline-block; background: #4f46e5; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500;">
+            点击验证邮箱
+          </a>
+        </p>
+        <p style="color: #9ca3af; font-size: 12px; border-top: 1px solid #e5e7eb; padding-top: 16px; margin-top: 16px;">
+          如果按钮无法点击，请复制以下链接到浏览器：<br />
+          <span style="word-break: break-all; color: #4f46e5;">${verifyLink}</span>
+        </p>
         <p style="color: #9ca3af; font-size: 12px;">此邮件由 LexiScribe 自动发送，请勿回复。</p>
       </div>
     `,
