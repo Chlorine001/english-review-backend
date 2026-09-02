@@ -54,7 +54,11 @@
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
-	"vars": { "JWT_EXPIRES_IN": "180", "MAX_FILE_SIZE": "52428800" },
+	"vars": {
+		"JWT_EXPIRES_IN": "1440",
+		"MAX_FILE_SIZE": "52428800",
+		"EMAIL_FROM": "verify@lexiscribe.cdragon.win",
+	},
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
