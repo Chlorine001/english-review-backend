@@ -7,6 +7,7 @@ import {
   generateSalt, hashPassword, verifyPassword,
   signJWT, authenticate
 } from './auth';
+import { Resend } from 'resend';
 
 import {
   ALLOWED_MEDIA_TYPES,
@@ -21,6 +22,8 @@ type Bindings = {
   JWT_EXPIRES_IN: string;   // 以分钟为单位的字符串
   R2_BUCKET: R2Bucket;
   MAX_FILE_SIZE?: string;
+  EMAIL_FROM: string;
+  RESEND_API_KEY: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -37,6 +40,7 @@ app.use('/*', cors({
   allowHeaders: ['Content-Type', 'Authorization'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   credentials: true,
+  maxAge: 86400, // ✅ 缓存预检结果 24 小时（单位：秒）
 }));
 
 // 全局错误处理（必须放在所有路由之前）
@@ -102,15 +106,87 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
   }
 });
 
+// ---------- 发送验证码 ----------
+app.post('/api/auth/send-verification', async (c) => {
+  const { email } = await c.req.json();
+  if (!email) return c.json({ error: '邮箱不能为空' }, 400);
+
+  // 检查用户是否存在
+  const user = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+
+  // 生成 6 位数字验证码
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 分钟
+
+  // 保存验证码
+  await c.env.DB.prepare(
+    'UPDATE users SET verification_code = ?, verification_code_expires_at = ? WHERE email = ?'
+  ).bind(code, expiresAt.toISOString(), email).run();
+
+  // 发送邮件
+  const resend = new Resend(c.env.RESEND_API_KEY);
+  await resend.emails.send({
+    from: c.env.EMAIL_FROM,
+    to: email,
+    subject: 'LexiScribe 邮箱验证码',
+    html: `
+      <div style="font-family: sans-serif; max-width: 400px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
+        <h2 style="color: #4f46e5;">✒️ LexiScribe</h2>
+        <p>请使用以下验证码完成邮箱验证：</p>
+        <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; text-align: center; background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
+          ${code}
+        </div>
+        <p style="color: #6b7280; font-size: 14px;">验证码有效期为 10 分钟，请尽快使用。</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;" />
+        <p style="color: #9ca3af; font-size: 12px;">此邮件由 LexiScribe 自动发送，请勿回复。</p>
+      </div>
+    `,
+  });
+
+  return c.json({ success: true, message: '验证码已发送' });
+});
+
+// ---------- 验证邮箱 ----------
+app.post('/api/auth/verify-email', async (c) => {
+  const { email, code } = await c.req.json();
+  if (!email || !code) return c.json({ error: '邮箱和验证码不能为空' }, 400);
+
+  const user = await c.env.DB.prepare(
+    'SELECT id, verification_code, verification_code_expires_at, is_verified FROM users WHERE email = ?'
+  ).bind(email).first<any>();
+
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  if (user.is_verified) return c.json({ error: '邮箱已验证' }, 400);
+  if (user.verification_code !== code) return c.json({ error: '验证码错误' }, 400);
+  if (new Date(user.verification_code_expires_at) < new Date()) {
+    return c.json({ error: '验证码已过期' }, 400);
+  }
+
+  // 激活账号
+  await c.env.DB.prepare(
+    'UPDATE users SET is_verified = 1, email_verified_at = CURRENT_TIMESTAMP, verification_code = NULL, verification_code_expires_at = NULL WHERE id = ?'
+  ).bind(user.id).run();
+
+  return c.json({ success: true, message: '邮箱验证成功，请登录' });
+});
+
 // ---------- 登录 ----------
 app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   const { email, password } = c.req.valid('json');
   const user = await c.env.DB.prepare(
-    'SELECT id, email, salt, password_hash FROM users WHERE email = ?'
-  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string }>();
+    'SELECT id, email, salt, password_hash, is_verified FROM users WHERE email = ?'
+  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string; is_verified: number }>();
+
   if (!user) {
     return c.json({ error: '用户不存在！请先注册！' }, 401);
   }
+
+  // 新增：检查邮箱是否已验证
+  if (!user.is_verified) {
+    return c.json({ error: '邮箱未验证，请先验证邮箱！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
+
   const isValid = await verifyPassword(password, user.salt, user.password_hash);
   if (!isValid) {
     return c.json({ error: '用户或密码不正确！' }, 401);
@@ -133,6 +209,7 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   );
 });
 
+// ---------- 退出登录 ----------
 app.post('/api/auth/logout', async (c) => {
   // 即使没有携带有效 token，也清除 Cookie（无状态注销）
   // 但如果你希望只有登录用户才能注销，可以调用 authenticate
