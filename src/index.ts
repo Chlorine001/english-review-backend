@@ -652,4 +652,20 @@ app.put('/api/user/password', async (c) => {
 
   return c.json({ success: true });
 });
+
+// ---------- 检查邮箱状态 ----------
+app.post('/api/auth/check-email', async (c) => {
+  const { email } = await c.req.json();
+  if (!email) return c.json({ error: '邮箱不能为空' }, 400);
+
+  const user = await c.env.DB.prepare(
+    'SELECT is_verified FROM users WHERE email = ?'
+  ).bind(email).first<{ is_verified: number }>();
+
+  if (!user) {
+    return c.json({ exists: false, verified: false });
+  }
+  return c.json({ exists: true, verified: user.is_verified === 1 });
+});
+
 export default app;
