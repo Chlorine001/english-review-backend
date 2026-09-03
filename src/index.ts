@@ -187,8 +187,8 @@ app.post('/api/auth/verify-email', async (c) => {
 app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   const { email, password } = c.req.valid('json');
   const user = await c.env.DB.prepare(
-    'SELECT id, email, salt, password_hash, is_verified FROM users WHERE email = ?'
-  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string; is_verified: number }>();
+    'SELECT id, email, salt, password_hash, is_verified, nickname FROM users WHERE email = ?'
+  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string; is_verified: number, nickname: string }>();
 
   if (!user) {
     return c.json({ error: '用户不存在！请先注册！' }, 401);
@@ -212,7 +212,7 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   );
   // 返回 JSON 同时设置 HttpOnly Cookie
   return c.json(
-    { user: { id: user.id, email: user.email } },
+    { user: { id: user.id, email: user.email, nickName: user.nickname || null } },
     {
       headers: {
         'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
@@ -587,4 +587,69 @@ app.delete('/api/sentences/:id/media', async (c) => {
   return c.json({ success: true });
 });
 
+// ---------- 用户资料 ----------
+// 获取当前用户信息
+app.get('/api/user/profile', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const user = await c.env.DB.prepare(
+    'SELECT id, created_at FROM users WHERE id = ?'
+  ).bind(auth.userId).first<{ id: number; email: string; nickname: string | null; created_at: string }>();
+  if (!user) return c.json({ error: 'User not found' }, 404);
+
+  return c.json(user);
+});
+
+// 更新昵称
+app.put('/api/user/updateprofile', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+  const { nickname } = await c.req.json();
+  if (typeof nickname !== 'string' || nickname.trim().length === 0) {
+    return c.json({ error: '昵称不能为空' }, 400);
+  }
+  // 后端校验示例
+  if (Array.from(nickname).length > 20) {
+    return c.json({ error: '昵称不能超过20个字符' }, 400);
+  }
+  await c.env.DB.prepare(
+    'UPDATE users SET nickname = ? WHERE id = ?'
+  ).bind(nickname.trim(), auth.userId).run();
+
+  return c.json({ success: true, nickname: nickname.trim() });
+});
+
+// 修改密码
+app.put('/api/user/password', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const { oldPassword, newPassword } = await c.req.json();
+  if (!oldPassword || !newPassword || newPassword.length < 6) {
+    return c.json({ error: '新密码长度至少为6位' }, 400);
+  }
+
+  // 获取当前用户盐和哈希
+  const user = await c.env.DB.prepare(
+    'SELECT salt, password_hash FROM users WHERE id = ?'
+  ).bind(auth.userId).first<{ salt: string; password_hash: string }>();
+  if (!user) return c.json({ error: 'User not found' }, 404);
+
+  // 验证旧密码
+  const isValid = await verifyPassword(oldPassword, user.salt, user.password_hash);
+  if (!isValid) {
+    return c.json({ error: '当前密码错误' }, 403);
+  }
+
+  // 生成新密码哈希
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(newPassword, newSalt);
+
+  await c.env.DB.prepare(
+    'UPDATE users SET salt = ?, password_hash = ? WHERE id = ?'
+  ).bind(newSalt, newHash, auth.userId).run();
+
+  return c.json({ success: true });
+});
 export default app;
