@@ -66,7 +66,7 @@ const registerSchema = z.object({
 // });
 
 app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => {
-  const { email, password } = c.req.valid('json');
+  const { email, password, refCode } = await c.req.json();
   const salt = generateSalt();
   const hash = await hashPassword(password, salt);
 
@@ -79,13 +79,38 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
     if (!result || typeof result.id !== 'number') {
       return c.json({ error: '非法注册！' }, 500);
     }
-    // ✅ 修改：传入 secret 和过期分钟数
+    // 传入 secret 和过期分钟数
     const token = await signJWT(
       { userId: result.id, email },
       c.env.JWT_SECRET,
       parseInt(c.env.JWT_EXPIRES_IN)
     );
-    // ✅ 修改：传入 secret 和过期分钟数
+   
+    // 如果有邀请码，处理邀请
+    if (refCode) {
+      const invite = await c.env.DB.prepare(
+        'SELECT id, user_id FROM invitations WHERE code = ?'
+      ).bind(refCode).first();
+
+      if (invite) {
+        // 插入邀请记录
+        await c.env.DB.prepare(
+          `INSERT INTO invitation_records (invitation_id, invitee_email, invitee_id, status, registered_at) 
+         VALUES (?, ?, ?, 'registered', CURRENT_TIMESTAMP)`
+        ).bind(invite.id, email, result.id).run();
+
+        // 更新邀请统计
+        await c.env.DB.prepare(
+          `UPDATE invitations 
+         SET total_invited = total_invited + 1, 
+             registered_count = registered_count + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+        ).bind(invite.id).run();
+      }
+    }
+
+    // 传入 secret 和过期分钟数
     const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
     // 返回 JSON 同时设置 HttpOnly Cookie
     return c.json(
@@ -666,6 +691,94 @@ app.post('/api/auth/check-email', async (c) => {
     return c.json({ exists: false, verified: false });
   }
   return c.json({ exists: true, verified: user.is_verified === 1 });
+});
+
+app.get('/api/invitations/my-link', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  let invite = await c.env.DB.prepare(
+    'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
+  ).bind(auth.userId).first();
+
+  // 如果没有，则创建
+  if (!invite) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const code = generateInviteCode(auth.userId);
+      await c.env.DB.prepare(
+        'INSERT INTO invitations (user_id, code) VALUES (?, ?)'
+      ).bind(auth.userId, code).run();
+
+      invite = await c.env.DB.prepare(
+        'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
+      ).bind(auth.userId).first();
+
+      if (invite) {
+        break;
+      }
+    }
+
+    if (!invite) {
+      throw new Error('生成邀请链接失败，请稍后重试！');
+    }
+  }
+
+
+  return c.json({
+    code: invite.code,
+    link: `${c.env.FRONTEND_URL}/register?ref=${invite.code}`
+  });
+});
+
+// 生成邀请码：用户ID + 时间戳 + 随机字符
+function generateInviteCode(userId: number): string {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `${userId}${timestamp.slice(-4)}${random}`;
+}
+
+// 获取邀请统计
+app.get('/api/invitations/stats', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  // 获取总邀请数和注册数
+  const invite = await c.env.DB.prepare(
+    'SELECT total_invited, registered_count FROM invitations WHERE user_id = ?'
+  ).bind(auth.userId).first();
+
+  // 获取最近邀请记录
+  const records = await c.env.DB.prepare(
+    `SELECT invitee_email, status, created_at, registered_at 
+     FROM invitation_records 
+     WHERE invitation_id = (SELECT id FROM invitations WHERE user_id = ?)
+     ORDER BY created_at DESC 
+     LIMIT 20`
+  ).bind(auth.userId).all();
+
+  return c.json({
+    total: invite?.total_invited || 0,
+    registered: invite?.registered_count || 0,
+    records: records.results || []
+  });
+});
+
+app.post('/api/invitations/track-click', async (c) => {
+  const { code } = await c.req.json();
+  if (!code) return c.json({ error: 'Code required' }, 400);
+
+  const invite = await c.env.DB.prepare(
+    'SELECT id FROM invitations WHERE code = ?'
+  ).bind(code).first();
+
+  if (invite) {
+    await c.env.DB.prepare(
+      `INSERT INTO invitation_records (invitation_id, status) 
+       VALUES (?, 'accepted')`
+    ).bind(invite.id).run();
+  }
+
+  return c.json({ success: true });
 });
 
 export default app;
