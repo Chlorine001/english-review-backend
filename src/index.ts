@@ -796,7 +796,7 @@ app.get('/api/invitations/stats', async (c) => {
 
   // 获取最近邀请记录
   const records = await c.env.DB.prepare(
-    `SELECT invitee_email, status, created_at, registered_at 
+    `SELECT invitee_email, status, created_at, registered_at, ip_address 
      FROM invitation_records 
      WHERE invitation_id = (SELECT id FROM invitations WHERE user_id = ?)
      ORDER BY created_at DESC 
