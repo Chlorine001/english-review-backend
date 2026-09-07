@@ -86,25 +86,27 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       parseInt(c.env.JWT_EXPIRES_IN)
     );
 
-    // 初始化积分记录
-    const service = new PointsService(c.env.DB);
-    await service.ensureUserPoints(result.id);
-
-    // 如果是通过邀请注册的，给邀请人加积分
     if (refCode) {
       const invite = await c.env.DB.prepare(
         'SELECT id, user_id FROM invitations WHERE code = ?'
       ).bind(refCode).first<{ id: number; user_id: number }>();
 
       if (invite) {
-        // 邀请人 +10 分
-        await service.addPoints(
-          invite.user_id,
-          10,
-          'invite_register',
-          `邀请 ${email} 注册成功`,
-          invite.id
-        );
+        // 更新 invitation_records：关联新用户
+        await c.env.DB.prepare(
+          `UPDATE invitation_records 
+           SET invitee_id = ?, invitee_email = ?, status = 'registered', registered_at = CURRENT_TIMESTAMP
+           WHERE invitation_id = ? AND status = 'accepted'
+           ORDER BY created_at ASC LIMIT 1`
+        ).bind(result.id, email, invite.id).run();
+
+        // 更新邀请统计
+        await c.env.DB.prepare(
+          `UPDATE invitations 
+         SET registered_count = registered_count + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+        ).bind(invite.id).run();
       }
     }
 
@@ -202,6 +204,49 @@ app.post('/api/auth/verify-email', async (c) => {
   await c.env.DB.prepare(
     'UPDATE users SET is_verified = 1, email_verified_at = CURRENT_TIMESTAMP, verification_code = NULL, verification_code_expires_at = NULL WHERE id = ?'
   ).bind(user.id).run();
+
+  // 邮箱验证成功 +5 积分
+  const pointsService = new PointsService(c.env.DB);
+  await pointsService.ensureUserPoints(user.id);
+  await pointsService.addPoints(
+    user.id,
+    5,
+    'system',
+    '邮箱验证成功奖励'
+  );
+
+  // 给邀请人 +10 积分（如果有邀请记录）
+  try {
+    // 查找该用户对应的邀请记录（确认该用户是通过邀请注册的）
+    const inviteRecord = await c.env.DB.prepare(
+      `SELECT ir.invitation_id, i.user_id as inviter_id
+       FROM invitation_records ir
+       JOIN invitations i ON ir.invitation_id = i.id
+       WHERE ir.invitee_id = ? AND ir.status = 'registered'
+       ORDER BY ir.created_at ASC LIMIT 1`
+    ).bind(user.id).first<{ invitation_id: number; inviter_id: number }>();
+
+    if (inviteRecord) {
+      // 检查邀请人是否已经获得过积分（防止重复奖励）
+      const existingReward = await c.env.DB.prepare(
+        `SELECT id FROM points_log 
+         WHERE user_id = ? AND source_id = ? AND type = 'invite_register'`
+      ).bind(inviteRecord.inviter_id, inviteRecord.invitation_id).first();
+
+      if (!existingReward) {
+        await pointsService.addPoints(
+          inviteRecord.inviter_id,
+          10,
+          'invite_register',
+          `邀请用户 ${email} 完成邮箱验证`,
+          inviteRecord.invitation_id
+        );
+      }
+    }
+  } catch (err) {
+    console.error('邀请人积分奖励失败:', err);
+    // 不影响用户验证成功的结果
+  }
 
   return c.json({ success: true, message: '邮箱验证成功，请登录' });
 });
@@ -781,16 +826,54 @@ app.post('/api/invitations/track-click', async (c) => {
   const { code } = await c.req.json();
   if (!code) return c.json({ error: 'Code required' }, 400);
 
+  if (typeof code !== 'string') {
+    console.log(typeof code);
+    return c.json({ error: 'Invalid code format' }, 400);
+  }
+
+  // ✅ 获取真实 IP（Cloudflare 自动注入）
+  const ip =
+    c.req.header('CF-Connecting-IP') ||           // Cloudflare 真实 IP（生产环境）
+    c.req.header('X-Forwarded-For')?.split(',')[0] || // 代理链 IP
+    c.req.header('X-Real-IP') || 'unknown';           // 某些代理
+  const userAgent = c.req.header('User-Agent') || 'unknown';
+
+  const deviceType =
+    c.req.header('CF-Device-Type') ||   // Cloudflare 提供的设备类型
+    (c.req.header('User-Agent')?.includes('Mobile') ? 'mobile' : 'desktop') || // 简单降级
+    'unknown';
+
   const invite = await c.env.DB.prepare(
     'SELECT id FROM invitations WHERE code = ?'
-  ).bind(code).first();
+  ).bind(code).first<{ id: number }>();
 
-  if (invite) {
-    await c.env.DB.prepare(
-      `INSERT INTO invitation_records (invitation_id, status) 
-       VALUES (?, 'accepted')`
-    ).bind(invite.id).run();
+  if (!invite) return c.json({ error: 'Invalid invite code' }, 404);
+
+  // 检查同一 IP 是否已点击过该邀请
+  const existing = await c.env.DB.prepare(
+    `SELECT id FROM invitation_records 
+   WHERE invitation_id = ? AND ip_address = ? AND status = 'accepted'`
+  ).bind(invite.id, ip).first();
+
+  if (existing) {
+    return c.json({ success: true, message: '已记录过该 IP 的点击' });
+    // return c.json({ error: '已记录过该 IP 的点击' }, 400);
   }
+
+  // 插入一条 accepted 记录
+  await c.env.DB.prepare(
+    `INSERT INTO invitation_records 
+     (invitation_id, status, ip_address, user_agent, device_type) 
+     VALUES (?, 'accepted', ?, ?, ?)`
+  ).bind(invite.id, ip, userAgent, deviceType).run();
+
+  // 更新邀请统计
+  await c.env.DB.prepare(
+    `UPDATE invitations 
+         SET total_invited = total_invited + 1, 
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+  ).bind(invite.id).run();
 
   return c.json({ success: true });
 });
