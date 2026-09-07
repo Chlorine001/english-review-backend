@@ -85,14 +85,19 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
         'SELECT id, user_id FROM invitations WHERE code = ?'
       ).bind(refCode).first<{ id: number; user_id: number }>();
 
+      const ip =
+        c.req.header('CF-Connecting-IP') ||           // Cloudflare 真实 IP（生产环境）
+        c.req.header('X-Forwarded-For')?.split(',')[0] || // 代理链 IP
+        c.req.header('X-Real-IP') || 'unknown';           // 某些代理
+
       if (invite) {
         // 更新 invitation_records：关联新用户
         await c.env.DB.prepare(
           `UPDATE invitation_records 
            SET invitee_id = ?, invitee_email = ?, status = 'registered', registered_at = CURRENT_TIMESTAMP
-           WHERE invitation_id = ? AND status = 'accepted'
+           WHERE invitation_id = ? AND status = 'accepted' AND ip_address = ?
            ORDER BY created_at ASC LIMIT 1`
-        ).bind(result.id, email, invite.id).run();
+        ).bind(result.id, email, invite.id, ip).run();
 
         // 更新邀请统计
         await c.env.DB.prepare(
@@ -796,16 +801,35 @@ app.get('/api/invitations/stats', async (c) => {
 
   // 获取最近邀请记录
   const records = await c.env.DB.prepare(
-    `SELECT invitee_email, status, created_at, registered_at, ip_address 
-     FROM invitation_records 
-     WHERE invitation_id = (SELECT id FROM invitations WHERE user_id = ?)
-     ORDER BY created_at DESC 
-     LIMIT 20`
+    `SELECT 
+       ir.id,
+       ir.invitee_email,
+       ir.status,
+       ir.created_at,
+       ir.registered_at,
+       ir.ip_address,
+       ir.device_type,
+       u.is_verified AS invitee_verified
+     FROM invitation_records ir
+     LEFT JOIN users u ON ir.invitee_id = u.id
+     WHERE ir.invitation_id = (SELECT id FROM invitations WHERE user_id = ?)
+     ORDER BY ir.created_at DESC
+     LIMIT 50`
   ).bind(auth.userId).all();
+
+  // 统计已认证数量（被邀请用户中已验证邮箱的）
+  const verifiedResult = await c.env.DB.prepare(
+    `SELECT COUNT(*) as count
+     FROM invitation_records ir
+     JOIN invitations i ON ir.invitation_id = i.id
+     JOIN users u ON ir.invitee_id = u.id
+     WHERE i.user_id = ? AND ir.status = 'registered' AND u.is_verified = 1`
+  ).bind(auth.userId).first<{ count: number }>();
 
   return c.json({
     total: invite?.total_invited || 0,
     registered: invite?.registered_count || 0,
+    verified: verifiedResult?.count || 0,
     records: records.results || []
   });
 });
