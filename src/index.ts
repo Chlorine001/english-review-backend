@@ -79,12 +79,6 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
     if (!result || typeof result.id !== 'number') {
       return c.json({ error: '非法注册！' }, 500);
     }
-    // 传入 secret 和过期分钟数
-    const token = await signJWT(
-      { userId: result.id, email },
-      c.env.JWT_SECRET,
-      parseInt(c.env.JWT_EXPIRES_IN)
-    );
 
     if (refCode) {
       const invite = await c.env.DB.prepare(
@@ -110,17 +104,11 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       }
     }
 
-    // 传入 secret 和过期分钟数
-    const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
-    // 返回 JSON 同时设置 HttpOnly Cookie
-    return c.json(
-      { user: { id: result.id, email } },
-      {
-        headers: {
-          'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
-        },
-      }
-    );
+    return c.json({
+      success: true,
+      message: '注册成功，请验证邮箱',
+      email: email
+    }, 201);
   } catch (err: any) {
     // 捕获 UNIQUE 约束冲突（邮箱重复）
     if (err?.message?.includes('UNIQUE constraint failed')) {
