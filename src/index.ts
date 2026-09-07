@@ -85,28 +85,26 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
       c.env.JWT_SECRET,
       parseInt(c.env.JWT_EXPIRES_IN)
     );
-   
-    // 如果有邀请码，处理邀请
+
+    // 初始化积分记录
+    const service = new PointsService(c.env.DB);
+    await service.ensureUserPoints(result.id);
+
+    // 如果是通过邀请注册的，给邀请人加积分
     if (refCode) {
       const invite = await c.env.DB.prepare(
         'SELECT id, user_id FROM invitations WHERE code = ?'
-      ).bind(refCode).first();
+      ).bind(refCode).first<{ id: number; user_id: number }>();
 
       if (invite) {
-        // 插入邀请记录
-        await c.env.DB.prepare(
-          `INSERT INTO invitation_records (invitation_id, invitee_email, invitee_id, status, registered_at) 
-         VALUES (?, ?, ?, 'registered', CURRENT_TIMESTAMP)`
-        ).bind(invite.id, email, result.id).run();
-
-        // 更新邀请统计
-        await c.env.DB.prepare(
-          `UPDATE invitations 
-         SET total_invited = total_invited + 1, 
-             registered_count = registered_count + 1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`
-        ).bind(invite.id).run();
+        // 邀请人 +10 分
+        await service.addPoints(
+          invite.user_id,
+          10,
+          'invite_register',
+          `邀请 ${email} 注册成功`,
+          invite.id
+        );
       }
     }
 
@@ -235,6 +233,23 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     c.env.JWT_SECRET,
     expiresInMinutes
   );
+
+  // 每日首次登录积分
+  const service = new PointsService(c.env.DB);
+  const today = new Date().toISOString().slice(0, 10);
+  const hasToday = await c.env.DB.prepare(
+    'SELECT id FROM points_log WHERE user_id = ? AND type = "daily_login" AND DATE(created_at) = ?'
+  ).bind(user.id, today).first();
+
+  if (!hasToday) {
+    await service.addPoints(
+      user.id,
+      1,
+      'daily_login',
+      '每日登录奖励'
+    );
+  }
+
   // 返回 JSON 同时设置 HttpOnly Cookie
   return c.json(
     { user: { id: user.id, email: user.email, nickName: user.nickname || null } },
@@ -723,7 +738,6 @@ app.get('/api/invitations/my-link', async (c) => {
     }
   }
 
-
   return c.json({
     code: invite.code,
     link: `${c.env.FRONTEND_URL}/register?ref=${invite.code}`
@@ -781,4 +795,141 @@ app.post('/api/invitations/track-click', async (c) => {
   return c.json({ success: true });
 });
 
+// ====== 积分服务 ======
+interface PointsService {
+  addPoints(userId: number, points: number, type: string, description: string, sourceId?: number): Promise<void>;
+  getPoints(userId: number): Promise<{ total: number; level: string; levelIcon: string }>;
+  getLogs(userId: number, limit?: number): Promise<any[]>;
+}
+
+class PointsService {
+  private db: D1Database;
+
+  constructor(db: D1Database) {
+    this.db = db;
+  }
+
+  // 添加积分
+  async addPoints(userId: number, points: number, type: string, description: string, sourceId?: number): Promise<void> {
+    // 确保用户有积分记录
+    await this.ensureUserPoints(userId);
+
+    // 更新总积分
+    await this.db.prepare(
+      'UPDATE user_points SET total_points = total_points + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).bind(points, userId).run();
+
+    // 记录流水
+    await this.db.prepare(
+      `INSERT INTO points_log (user_id, points, type, source_id, description) 
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(userId, points, type, sourceId || null, description).run();
+
+    // 更新等级
+    await this.updateLevel(userId);
+  }
+
+  // 确保用户有积分记录
+  async ensureUserPoints(userId: number): Promise<void> {
+    const exists = await this.db.prepare(
+      'SELECT id FROM user_points WHERE user_id = ?'
+    ).bind(userId).first();
+
+    if (!exists) {
+      await this.db.prepare(
+        'INSERT INTO user_points (user_id) VALUES (?)'
+      ).bind(userId).run();
+    }
+  }
+
+  // 获取用户积分和等级
+  async getPoints(userId: number): Promise<{ total: number; level: string; levelIcon: string }> {
+    await this.ensureUserPoints(userId);
+
+    const result = await this.db.prepare(
+      'SELECT total_points, level, level_icon FROM user_points WHERE user_id = ?'
+    ).bind(userId).first<{ total_points: number; level: string; level_icon: string }>();
+
+    return {
+      total: result?.total_points || 0,
+      level: result?.level || '青铜',
+      levelIcon: result?.level_icon || '🥉',
+    };
+  }
+
+  // 获取积分流水
+  async getLogs(userId: number, limit: number = 50): Promise<any[]> {
+    const logs = await this.db.prepare(
+      `SELECT points, type, description, created_at 
+       FROM points_log 
+       WHERE user_id = ? 
+       ORDER BY created_at DESC 
+       LIMIT ?`
+    ).bind(userId, limit).all();
+
+    return logs.results || [];
+  }
+
+  // 更新等级
+  async updateLevel(userId: number): Promise<void> {
+    const points = await this.db.prepare(
+      'SELECT total_points FROM user_points WHERE user_id = ?'
+    ).bind(userId).first<{ total_points: number }>();
+
+    if (!points) return;
+
+    const total = points.total_points || 0;
+    let level = '青铜';
+    let icon = '🥉';
+
+    if (total >= 500) { level = '传奇'; icon = '🏆'; }
+    else if (total >= 200) { level = '钻石'; icon = '💎'; }
+    else if (total >= 100) { level = '黄金'; icon = '🥇'; }
+    else if (total >= 50) { level = '白银'; icon = '🥈'; }
+
+    await this.db.prepare(
+      'UPDATE user_points SET level = ?, level_icon = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).bind(level, icon, userId).run();
+  }
+}
+
+
+// ====== 积分 API ======
+
+// 获取我的积分
+app.get('/api/points', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const service = new PointsService(c.env.DB);
+  const points = await service.getPoints(auth.userId);
+  return c.json(points);
+});
+
+// 获取积分流水
+app.get('/api/points/log', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const limit = Number(c.req.query('limit')) || 50;
+  const service = new PointsService(c.env.DB);
+  const logs = await service.getLogs(auth.userId, limit);
+  return c.json(logs);
+});
+
+// 积分排行榜（可选）
+app.get('/api/points/rank', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const rank = await c.env.DB.prepare(
+    `SELECT u.nickname, u.email, p.total_points, p.level, p.level_icon
+     FROM user_points p
+     JOIN users u ON p.user_id = u.id
+     ORDER BY p.total_points DESC
+     LIMIT 20`
+  ).all();
+
+  return c.json(rank.results || []);
+});
 export default app;
