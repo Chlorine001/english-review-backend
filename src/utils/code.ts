@@ -4,3 +4,9 @@ export function generateInviteCode(userId: number): string {
     const random = Math.random().toString(36).substring(2, 6).toUpperCase();
     return `${userId}${timestamp.slice(-4)}${random}`;
 }
+
+export function generateGroupCode(): string {
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+    return `GRP-${timestamp.slice(-4)}${random}`;
+}
