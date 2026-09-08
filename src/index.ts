@@ -255,15 +255,16 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     return c.json({ error: '用户不存在！请先注册！' }, 401);
   }
 
-  // 新增：检查邮箱是否已验证
-  if (!user.is_verified) {
-    return c.json({ error: '邮箱未验证，请先验证邮箱！', code: 'EMAIL_NOT_VERIFIED' }, 403);
-  }
+  // // 新增：检查邮箱是否已验证
+  // if (!user.is_verified) {
+  //   return c.json({ error: '邮箱未验证，请先验证邮箱！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  // }
 
   const isValid = await verifyPassword(password, user.salt, user.password_hash);
   if (!isValid) {
     return c.json({ error: '用户或密码不正确！' }, 401);
   }
+
   // ✅ 修改：传入 secret 和过期分钟数
   const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
   const token = await signJWT(
@@ -290,7 +291,14 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
 
   // 返回 JSON 同时设置 HttpOnly Cookie
   return c.json(
-    { user: { id: user.id, email: user.email, nickName: user.nickname || null } },
+    {
+      user: {
+        id: user.id,
+        email: user.email,
+        nickname: user.nickname || null,
+        is_verified: user.is_verified === 1,  // ✅ 返回验证状态
+      }
+    },
     {
       headers: {
         'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
