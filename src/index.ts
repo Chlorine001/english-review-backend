@@ -66,7 +66,7 @@ const registerSchema = z.object({
 // });
 
 app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => {
-  const { email, password } = c.req.valid('json');
+  const { email, password, refCode } = await c.req.json();
   const salt = generateSalt();
   const hash = await hashPassword(password, salt);
 
@@ -79,23 +79,41 @@ app.post('/api/auth/register', zValidator('json', registerSchema), async (c) => 
     if (!result || typeof result.id !== 'number') {
       return c.json({ error: '非法注册！' }, 500);
     }
-    // ✅ 修改：传入 secret 和过期分钟数
-    const token = await signJWT(
-      { userId: result.id, email },
-      c.env.JWT_SECRET,
-      parseInt(c.env.JWT_EXPIRES_IN)
-    );
-    // ✅ 修改：传入 secret 和过期分钟数
-    const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
-    // 返回 JSON 同时设置 HttpOnly Cookie
-    return c.json(
-      { user: { id: result.id, email } },
-      {
-        headers: {
-          'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
-        },
+
+    if (refCode) {
+      const invite = await c.env.DB.prepare(
+        'SELECT id, user_id FROM invitations WHERE code = ?'
+      ).bind(refCode).first<{ id: number; user_id: number }>();
+
+      const ip =
+        c.req.header('CF-Connecting-IP') ||           // Cloudflare 真实 IP（生产环境）
+        c.req.header('X-Forwarded-For')?.split(',')[0] || // 代理链 IP
+        c.req.header('X-Real-IP') || 'unknown';           // 某些代理
+
+      if (invite) {
+        // 更新 invitation_records：关联新用户
+        await c.env.DB.prepare(
+          `UPDATE invitation_records 
+           SET invitee_id = ?, invitee_email = ?, status = 'registered', registered_at = CURRENT_TIMESTAMP
+           WHERE invitation_id = ? AND status = 'accepted' AND ip_address = ?
+           ORDER BY created_at ASC LIMIT 1`
+        ).bind(result.id, email, invite.id, ip).run();
+
+        // 更新邀请统计
+        await c.env.DB.prepare(
+          `UPDATE invitations 
+         SET registered_count = registered_count + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+        ).bind(invite.id).run();
       }
-    );
+    }
+
+    return c.json({
+      success: true,
+      message: '注册成功，请验证邮箱',
+      email: email
+    }, 201);
   } catch (err: any) {
     // 捕获 UNIQUE 约束冲突（邮箱重复）
     if (err?.message?.includes('UNIQUE constraint failed')) {
@@ -180,6 +198,49 @@ app.post('/api/auth/verify-email', async (c) => {
     'UPDATE users SET is_verified = 1, email_verified_at = CURRENT_TIMESTAMP, verification_code = NULL, verification_code_expires_at = NULL WHERE id = ?'
   ).bind(user.id).run();
 
+  // 邮箱验证成功 +5 积分
+  const pointsService = new PointsService(c.env.DB);
+  await pointsService.ensureUserPoints(user.id);
+  await pointsService.addPoints(
+    user.id,
+    5,
+    'system',
+    '邮箱验证成功奖励'
+  );
+
+  // 给邀请人 +10 积分（如果有邀请记录）
+  try {
+    // 查找该用户对应的邀请记录（确认该用户是通过邀请注册的）
+    const inviteRecord = await c.env.DB.prepare(
+      `SELECT ir.invitation_id, i.user_id as inviter_id
+       FROM invitation_records ir
+       JOIN invitations i ON ir.invitation_id = i.id
+       WHERE ir.invitee_id = ? AND ir.status = 'registered'
+       ORDER BY ir.created_at ASC LIMIT 1`
+    ).bind(user.id).first<{ invitation_id: number; inviter_id: number }>();
+
+    if (inviteRecord) {
+      // 检查邀请人是否已经获得过积分（防止重复奖励）
+      const existingReward = await c.env.DB.prepare(
+        `SELECT id FROM points_log 
+         WHERE user_id = ? AND source_id = ? AND type = 'invite_register'`
+      ).bind(inviteRecord.inviter_id, inviteRecord.invitation_id).first();
+
+      if (!existingReward) {
+        await pointsService.addPoints(
+          inviteRecord.inviter_id,
+          10,
+          'invite_register',
+          `邀请用户 ${email} 完成邮箱验证`,
+          inviteRecord.invitation_id
+        );
+      }
+    }
+  } catch (err) {
+    console.error('邀请人积分奖励失败:', err);
+    // 不影响用户验证成功的结果
+  }
+
   return c.json({ success: true, message: '邮箱验证成功，请登录' });
 });
 
@@ -187,22 +248,23 @@ app.post('/api/auth/verify-email', async (c) => {
 app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   const { email, password } = c.req.valid('json');
   const user = await c.env.DB.prepare(
-    'SELECT id, email, salt, password_hash, is_verified FROM users WHERE email = ?'
-  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string; is_verified: number }>();
+    'SELECT id, email, salt, password_hash, is_verified, nickname FROM users WHERE email = ?'
+  ).bind(email).first<{ id: number; email: string; salt: string; password_hash: string; is_verified: number, nickname: string }>();
 
   if (!user) {
     return c.json({ error: '用户不存在！请先注册！' }, 401);
   }
 
-  // 新增：检查邮箱是否已验证
-  if (!user.is_verified) {
-    return c.json({ error: '邮箱未验证，请先验证邮箱！', code: 'EMAIL_NOT_VERIFIED' }, 403);
-  }
+  // // 新增：检查邮箱是否已验证
+  // if (!user.is_verified) {
+  //   return c.json({ error: '邮箱未验证，请先验证邮箱！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  // }
 
   const isValid = await verifyPassword(password, user.salt, user.password_hash);
   if (!isValid) {
     return c.json({ error: '用户或密码不正确！' }, 401);
   }
+
   // ✅ 修改：传入 secret 和过期分钟数
   const expiresInMinutes = parseInt(c.env.JWT_EXPIRES_IN) || 60; // 默认 60 分钟
   const token = await signJWT(
@@ -210,9 +272,33 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     c.env.JWT_SECRET,
     expiresInMinutes
   );
+
+  // 每日首次登录积分
+  const service = new PointsService(c.env.DB);
+  const today = new Date().toISOString().slice(0, 10);
+  const hasToday = await c.env.DB.prepare(
+    'SELECT id FROM points_log WHERE user_id = ? AND type = "daily_login" AND DATE(created_at) = ?'
+  ).bind(user.id, today).first();
+
+  if (!hasToday) {
+    await service.addPoints(
+      user.id,
+      1,
+      'daily_login',
+      '每日登录奖励'
+    );
+  }
+
   // 返回 JSON 同时设置 HttpOnly Cookie
   return c.json(
-    { user: { id: user.id, email: user.email } },
+    {
+      user: {
+        id: user.id,
+        email: user.email,
+        nickname: user.nickname || null,
+        is_verified: user.is_verified === 1,  // ✅ 返回验证状态
+      }
+    },
     {
       headers: {
         'Set-Cookie': `token=${token}; HttpOnly; Path=/; Max-Age=${expiresInMinutes * 60}; SameSite=None; Secure`,
@@ -220,6 +306,23 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
     }
   );
 });
+
+// 验证用户是否已认证（用于需要验证的功能）
+// ====== 验证工具函数 ======
+async function requireVerified(db: D1Database, userId: number): Promise<{ verified: boolean; user?: any }> {
+  const user = await db.prepare(
+    'SELECT id, email, is_verified, nickname FROM users WHERE id = ?'
+  ).bind(userId).first<{ id: number; email: string; is_verified: number; nickname: string | null }>();
+
+  if (!user) {
+    return { verified: false };
+  }
+
+  return {
+    verified: user.is_verified === 1,
+    user: user,
+  };
+}
 
 // ---------- 退出登录 ----------
 app.post('/api/auth/logout', async (c) => {
@@ -485,6 +588,12 @@ app.post('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱后上传音频！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
+
   const id = Number(c.req.param('id'));
   // 验证句子属于当前用户
   const sentence = await c.env.DB.prepare('SELECT user_id FROM sentences WHERE id = ?').bind(id).first();
@@ -570,6 +679,12 @@ app.delete('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱后才可以删除音频！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
+
   const id = Number(c.req.param('id'));
   // 1. 验证句子归属
   const sentence = await c.env.DB.prepare('SELECT media_path FROM sentences WHERE id = ? AND user_id = ?')
@@ -587,4 +702,372 @@ app.delete('/api/sentences/:id/media', async (c) => {
   return c.json({ success: true });
 });
 
+// ---------- 用户资料 ----------
+// 获取当前用户信息
+app.get('/api/user/profile', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const user = await c.env.DB.prepare(
+    'SELECT id, created_at FROM users WHERE id = ?'
+  ).bind(auth.userId).first<{ id: number; email: string; nickname: string | null; created_at: string }>();
+  if (!user) return c.json({ error: 'User not found' }, 404);
+
+  return c.json(user);
+});
+
+// 更新昵称
+app.put('/api/user/updateprofile', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+  const { nickname } = await c.req.json();
+  if (typeof nickname !== 'string' || nickname.trim().length === 0) {
+    return c.json({ error: '昵称不能为空' }, 400);
+  }
+  // 后端校验示例
+  if (Array.from(nickname).length > 20) {
+    return c.json({ error: '昵称不能超过20个字符' }, 400);
+  }
+  await c.env.DB.prepare(
+    'UPDATE users SET nickname = ? WHERE id = ?'
+  ).bind(nickname.trim(), auth.userId).run();
+
+  return c.json({ success: true, nickname: nickname.trim() });
+});
+
+// 修改密码
+app.put('/api/user/password', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const { oldPassword, newPassword } = await c.req.json();
+  if (!oldPassword || !newPassword || newPassword.length < 6) {
+    return c.json({ error: '新密码长度至少为6位' }, 400);
+  }
+
+  // 获取当前用户盐和哈希
+  const user = await c.env.DB.prepare(
+    'SELECT salt, password_hash FROM users WHERE id = ?'
+  ).bind(auth.userId).first<{ salt: string; password_hash: string }>();
+  if (!user) return c.json({ error: 'User not found' }, 404);
+
+  // 验证旧密码
+  const isValid = await verifyPassword(oldPassword, user.salt, user.password_hash);
+  if (!isValid) {
+    return c.json({ error: '当前密码错误' }, 403);
+  }
+
+  // 生成新密码哈希
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(newPassword, newSalt);
+
+  await c.env.DB.prepare(
+    'UPDATE users SET salt = ?, password_hash = ? WHERE id = ?'
+  ).bind(newSalt, newHash, auth.userId).run();
+
+  return c.json({ success: true });
+});
+
+// ---------- 检查邮箱状态 ----------
+app.post('/api/auth/check-email', async (c) => {
+  const { email } = await c.req.json();
+  if (!email) return c.json({ error: '邮箱不能为空' }, 400);
+
+  const user = await c.env.DB.prepare(
+    'SELECT is_verified FROM users WHERE email = ?'
+  ).bind(email).first<{ is_verified: number }>();
+
+  if (!user) {
+    return c.json({ exists: false, verified: false });
+  }
+  return c.json({ exists: true, verified: user.is_verified === 1 });
+});
+
+app.get('/api/invitations/my-link', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱再尝试邀请！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
+
+  let invite = await c.env.DB.prepare(
+    'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
+  ).bind(auth.userId).first();
+
+  // 如果没有，则创建
+  if (!invite) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const code = generateInviteCode(auth.userId);
+      await c.env.DB.prepare(
+        'INSERT INTO invitations (user_id, code) VALUES (?, ?)'
+      ).bind(auth.userId, code).run();
+
+      invite = await c.env.DB.prepare(
+        'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
+      ).bind(auth.userId).first();
+
+      if (invite) {
+        break;
+      }
+    }
+
+    if (!invite) {
+      throw new Error('生成邀请链接失败，请稍后重试！');
+    }
+  }
+
+  return c.json({
+    code: invite.code,
+    link: `${c.env.FRONTEND_URL}/register?ref=${invite.code}`
+  });
+});
+
+// 生成邀请码：用户ID + 时间戳 + 随机字符
+function generateInviteCode(userId: number): string {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `${userId}${timestamp.slice(-4)}${random}`;
+}
+
+// 获取邀请统计
+app.get('/api/invitations/stats', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  // 获取总邀请数和注册数
+  const invite = await c.env.DB.prepare(
+    'SELECT total_invited, registered_count FROM invitations WHERE user_id = ?'
+  ).bind(auth.userId).first();
+
+  // 获取最近邀请记录
+  const records = await c.env.DB.prepare(
+    `SELECT 
+       ir.id,
+       ir.invitee_email,
+       ir.status,
+       ir.created_at,
+       ir.registered_at,
+       ir.ip_address,
+       ir.device_type,
+       u.is_verified AS invitee_verified
+     FROM invitation_records ir
+     LEFT JOIN users u ON ir.invitee_id = u.id
+     WHERE ir.invitation_id = (SELECT id FROM invitations WHERE user_id = ?)
+     ORDER BY ir.created_at DESC
+     LIMIT 50`
+  ).bind(auth.userId).all();
+
+  // 统计已认证数量（被邀请用户中已验证邮箱的）
+  const verifiedResult = await c.env.DB.prepare(
+    `SELECT COUNT(*) as count
+     FROM invitation_records ir
+     JOIN invitations i ON ir.invitation_id = i.id
+     JOIN users u ON ir.invitee_id = u.id
+     WHERE i.user_id = ? AND ir.status = 'registered' AND u.is_verified = 1`
+  ).bind(auth.userId).first<{ count: number }>();
+
+  return c.json({
+    total: invite?.total_invited || 0,
+    registered: invite?.registered_count || 0,
+    verified: verifiedResult?.count || 0,
+    records: records.results || []
+  });
+});
+
+app.post('/api/invitations/track-click', async (c) => {
+  const { code } = await c.req.json();
+  if (!code) return c.json({ error: 'Code required' }, 400);
+
+  if (typeof code !== 'string') {
+    console.log(typeof code);
+    return c.json({ error: 'Invalid code format' }, 400);
+  }
+
+  // ✅ 获取真实 IP（Cloudflare 自动注入）
+  const ip =
+    c.req.header('CF-Connecting-IP') ||           // Cloudflare 真实 IP（生产环境）
+    c.req.header('X-Forwarded-For')?.split(',')[0] || // 代理链 IP
+    c.req.header('X-Real-IP') || 'unknown';           // 某些代理
+  const userAgent = c.req.header('User-Agent') || 'unknown';
+
+  const deviceType =
+    c.req.header('CF-Device-Type') ||   // Cloudflare 提供的设备类型
+    (c.req.header('User-Agent')?.includes('Mobile') ? 'mobile' : 'desktop') || // 简单降级
+    'unknown';
+
+  const invite = await c.env.DB.prepare(
+    'SELECT id FROM invitations WHERE code = ?'
+  ).bind(code).first<{ id: number }>();
+
+  if (!invite) return c.json({ error: 'Invalid invite code' }, 404);
+
+  // 检查同一 IP 是否已点击过该邀请
+  const existing = await c.env.DB.prepare(
+    `SELECT id FROM invitation_records 
+   WHERE invitation_id = ? AND ip_address = ? AND status = 'accepted'`
+  ).bind(invite.id, ip).first();
+
+  if (existing) {
+    return c.json({ success: true, message: '已记录过该 IP 的点击' });
+    // return c.json({ error: '已记录过该 IP 的点击' }, 400);
+  }
+
+  // 插入一条 accepted 记录
+  await c.env.DB.prepare(
+    `INSERT INTO invitation_records 
+     (invitation_id, status, ip_address, user_agent, device_type) 
+     VALUES (?, 'accepted', ?, ?, ?)`
+  ).bind(invite.id, ip, userAgent, deviceType).run();
+
+  // 更新邀请统计
+  await c.env.DB.prepare(
+    `UPDATE invitations 
+         SET total_invited = total_invited + 1, 
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+  ).bind(invite.id).run();
+
+  return c.json({ success: true });
+});
+
+// ====== 积分服务 ======
+interface PointsService {
+  addPoints(userId: number, points: number, type: string, description: string, sourceId?: number): Promise<void>;
+  getPoints(userId: number): Promise<{ total: number; level: string; levelIcon: string }>;
+  getLogs(userId: number, limit?: number): Promise<any[]>;
+}
+
+class PointsService {
+  private db: D1Database;
+
+  constructor(db: D1Database) {
+    this.db = db;
+  }
+
+  // 添加积分
+  async addPoints(userId: number, points: number, type: string, description: string, sourceId?: number): Promise<void> {
+    // 确保用户有积分记录
+    await this.ensureUserPoints(userId);
+
+    // 更新总积分
+    await this.db.prepare(
+      'UPDATE user_points SET total_points = total_points + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).bind(points, userId).run();
+
+    // 记录流水
+    await this.db.prepare(
+      `INSERT INTO points_log (user_id, points, type, source_id, description) 
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(userId, points, type, sourceId || null, description).run();
+
+    // 更新等级
+    await this.updateLevel(userId);
+  }
+
+  // 确保用户有积分记录
+  async ensureUserPoints(userId: number): Promise<void> {
+    const exists = await this.db.prepare(
+      'SELECT id FROM user_points WHERE user_id = ?'
+    ).bind(userId).first();
+
+    if (!exists) {
+      await this.db.prepare(
+        'INSERT INTO user_points (user_id) VALUES (?)'
+      ).bind(userId).run();
+    }
+  }
+
+  // 获取用户积分和等级
+  async getPoints(userId: number): Promise<{ total: number; level: string; levelIcon: string }> {
+    await this.ensureUserPoints(userId);
+
+    const result = await this.db.prepare(
+      'SELECT total_points, level, level_icon FROM user_points WHERE user_id = ?'
+    ).bind(userId).first<{ total_points: number; level: string; level_icon: string }>();
+
+    return {
+      total: result?.total_points || 0,
+      level: result?.level || '青铜',
+      levelIcon: result?.level_icon || '🥉',
+    };
+  }
+
+  // 获取积分流水
+  async getLogs(userId: number, limit: number = 50): Promise<any[]> {
+    const logs = await this.db.prepare(
+      `SELECT points, type, description, created_at 
+       FROM points_log 
+       WHERE user_id = ? 
+       ORDER BY created_at DESC 
+       LIMIT ?`
+    ).bind(userId, limit).all();
+
+    return logs.results || [];
+  }
+
+  // 更新等级
+  async updateLevel(userId: number): Promise<void> {
+    const points = await this.db.prepare(
+      'SELECT total_points FROM user_points WHERE user_id = ?'
+    ).bind(userId).first<{ total_points: number }>();
+
+    if (!points) return;
+
+    const total = points.total_points || 0;
+    let level = '青铜';
+    let icon = '🥉';
+
+    if (total >= 500) { level = '传奇'; icon = '🏆'; }
+    else if (total >= 200) { level = '钻石'; icon = '💎'; }
+    else if (total >= 100) { level = '黄金'; icon = '🥇'; }
+    else if (total >= 50) { level = '白银'; icon = '🥈'; }
+
+    await this.db.prepare(
+      'UPDATE user_points SET level = ?, level_icon = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).bind(level, icon, userId).run();
+  }
+}
+
+
+// ====== 积分 API ======
+
+// 获取我的积分
+app.get('/api/points', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const service = new PointsService(c.env.DB);
+  const points = await service.getPoints(auth.userId);
+  return c.json(points);
+});
+
+// 获取积分流水
+app.get('/api/points/log', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const limit = Number(c.req.query('limit')) || 50;
+  const service = new PointsService(c.env.DB);
+  const logs = await service.getLogs(auth.userId, limit);
+  return c.json(logs);
+});
+
+// 积分排行榜（可选）
+app.get('/api/points/rank', async (c) => {
+  const auth = await authenticate(c.req.raw, c.env);
+  if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  const rank = await c.env.DB.prepare(
+    `SELECT u.nickname, u.email, p.total_points, p.level, p.level_icon
+     FROM user_points p
+     JOIN users u ON p.user_id = u.id
+     ORDER BY p.total_points DESC
+     LIMIT 20`
+  ).all();
+
+  return c.json(rank.results || []);
+});
 export default app;
