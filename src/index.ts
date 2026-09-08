@@ -307,6 +307,23 @@ app.post('/api/auth/login', zValidator('json', registerSchema), async (c) => {
   );
 });
 
+// 验证用户是否已认证（用于需要验证的功能）
+// ====== 验证工具函数 ======
+async function requireVerified(db: D1Database, userId: number): Promise<{ verified: boolean; user?: any }> {
+  const user = await db.prepare(
+    'SELECT id, email, is_verified, nickname FROM users WHERE id = ?'
+  ).bind(userId).first<{ id: number; email: string; is_verified: number; nickname: string | null }>();
+
+  if (!user) {
+    return { verified: false };
+  }
+
+  return {
+    verified: user.is_verified === 1,
+    user: user,
+  };
+}
+
 // ---------- 退出登录 ----------
 app.post('/api/auth/logout', async (c) => {
   // 即使没有携带有效 token，也清除 Cookie（无状态注销）
@@ -571,6 +588,12 @@ app.post('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱后上传音频！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
+
   const id = Number(c.req.param('id'));
   // 验证句子属于当前用户
   const sentence = await c.env.DB.prepare('SELECT user_id FROM sentences WHERE id = ?').bind(id).first();
@@ -655,6 +678,12 @@ app.get('/api/sentences/:id/media', async (c) => {
 app.delete('/api/sentences/:id/media', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱后才可以删除音频！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
 
   const id = Number(c.req.param('id'));
   // 1. 验证句子归属
@@ -757,6 +786,12 @@ app.post('/api/auth/check-email', async (c) => {
 app.get('/api/invitations/my-link', async (c) => {
   const auth = await authenticate(c.req.raw, c.env);
   if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+  // ✅ 检查是否已验证
+  const result = await requireVerified(c.env.DB, auth.userId);
+  if (!result.verified) {
+    return c.json({ error: '请先验证邮箱再尝试邀请！', code: 'EMAIL_NOT_VERIFIED' }, 403);
+  }
 
   let invite = await c.env.DB.prepare(
     'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
