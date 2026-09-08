@@ -1,6 +1,6 @@
 import { authenticate } from '../utils/auth';
 import { Hono } from 'hono';
-import{ generateInviteCode}from'../utils/invitecode';
+import{ generateInviteCode}from'../utils/code';
 import { inviteBindings } from '../types/bindings';
 import { requireVerified } from '../utils/verify';
 
