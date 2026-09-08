@@ -1,4 +1,3 @@
-// src/auth.ts
 const encoder = new TextEncoder();
 
 // Base64URL 工具函数
