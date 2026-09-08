@@ -882,7 +882,6 @@ app.post('/api/invitations/track-click', async (c) => {
   if (!code) return c.json({ error: 'Code required' }, 400);
 
   if (typeof code !== 'string') {
-    console.log(typeof code);
     return c.json({ error: 'Invalid code format' }, 400);
   }
 
