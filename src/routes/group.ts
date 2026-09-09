@@ -98,7 +98,7 @@ groupRoutes.post('/join', async (c) => {
     return c.json({ success: true, groupId: group.id });
 });
 
-groupRoutes.get('/api/groups/:id', async (c) => {
+groupRoutes.get('/:id', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
