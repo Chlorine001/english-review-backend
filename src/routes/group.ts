@@ -98,13 +98,13 @@ groupRoutes.post('/join', async (c) => {
     return c.json({ success: true, groupId: group.id });
 });
 
-
-groupRoutes.get('/:id', async (c) => {
+groupRoutes.get('/api/groups/:id', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
     const id = Number(c.req.param('id'));
 
+    // 1. 获取小组信息
     const group = await c.env.DB.prepare(
         `SELECT g.*, u.nickname as owner_name
      FROM groups g
@@ -114,7 +114,16 @@ groupRoutes.get('/:id', async (c) => {
 
     if (!group) return c.json({ error: '小组不存在' }, 404);
 
-    // 获取成员列表
+    // 2. 检查当前用户是否为创建者
+    const isOwner = group.owner_id === auth.userId;
+
+    // 3. 检查当前用户是否为成员
+    const member = await c.env.DB.prepare(
+        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(id, auth.userId).first();
+    const isMember = !!member;
+
+    // 4. 获取成员列表（包含角色信息）
     const members = await c.env.DB.prepare(
         `SELECT u.id, u.email, u.nickname, gm.role, gm.joined_at
      FROM group_members gm
@@ -123,5 +132,11 @@ groupRoutes.get('/:id', async (c) => {
      ORDER BY gm.role = 'owner' DESC, gm.joined_at ASC`
     ).bind(id).all();
 
-    return c.json({ ...group, members: members.results || [] });
+    // 5. 返回完整数据
+    return c.json({
+        ...group,
+        isOwner,
+        isMember,
+        members: members.results || [],
+    });
 });
