@@ -48,7 +48,9 @@ groupRoutes.get('/open', async (c) => {
        ) as is_member
      FROM groups g
      WHERE g.is_public = 1
-     ORDER BY g.created_at DESC
+     ORDER BY 
+       is_member ASC,       -- 未加入的排前面（0 在前，1 在后）
+       g.created_at DESC    -- 同组内按创建时间倒序
      LIMIT 50`
     ).bind(auth.userId).all();
 
@@ -97,9 +99,50 @@ groupRoutes.post('/join', async (c) => {
 
     recordMember(c.env.DB, group.id, auth.userId, 'member')
     // 记录动态
-    recordActivity(c.env.DB, group.id, auth.userId, 'join', `加入了小组！`);
+    recordActivity(c.env.DB, group.id, auth.userId, 'join', `通过邀请码加入了小组！`);
 
     return c.json({ success: true, groupId: group.id });
+});
+
+// 直接加入公开小组
+groupRoutes.post('/:id/join', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+    if (isNaN(groupId)) return c.json({ error: 'Invalid group id' }, 400);
+
+    // 1. 查小组
+    const group = await c.env.DB.prepare(
+        'SELECT id, is_public, member_count, max_members FROM groups WHERE id = ?'
+    ).bind(groupId).first<{ id: number; is_public: number; member_count: number; max_members: number }>();
+
+    if (!group) return c.json({ error: '小组不存在' }, 404);
+    if (!group.is_public) return c.json({ error: '该小组需要邀请码才能加入' }, 403);
+    if (group.member_count >= group.max_members) {
+        return c.json({ error: '小组已满' }, 400);
+    }
+
+    // 2. 检查是否已加入
+    const existing = await c.env.DB.prepare(
+        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(groupId, auth.userId).first();
+
+    if (existing) return c.json({ error: '已加入该小组' }, 400);
+
+    // 3. 加入
+    await c.env.DB.prepare(
+        `INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'member')`
+    ).bind(groupId, auth.userId).run();
+
+    await c.env.DB.prepare(
+        'UPDATE groups SET member_count = member_count + 1 WHERE id = ?'
+    ).bind(groupId).run();
+
+    // 4. 记录动态
+    await recordActivity(c.env.DB, groupId, auth.userId, 'join', '加入了小组！');
+
+    return c.json({ success: true, groupId });
 });
 
 groupRoutes.get('/:id', async (c) => {
@@ -118,14 +161,15 @@ groupRoutes.get('/:id', async (c) => {
 
     if (!group) return c.json({ error: '小组不存在' }, 404);
 
-    // 2. 检查当前用户是否为创建者
-    const isOwner = group.owner_id === auth.userId;
-
-    // 3. 检查当前用户是否为成员
+    // 2. 检查当前用户角色
     const member = await c.env.DB.prepare(
-        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
-    ).bind(id, auth.userId).first();
+        'SELECT role FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(id, auth.userId).first<{ role: string }>();
     const isMember = !!member;
+    const isAdmin = member?.role === 'admin';
+
+    // 3. 检查当前用户是否为组长
+    const isOwner = group.owner_id === auth.userId;
 
     // 4. 获取成员列表（包含角色信息）
     const members = await c.env.DB.prepare(
@@ -140,42 +184,11 @@ groupRoutes.get('/:id', async (c) => {
     return c.json({
         ...group,
         isOwner,
+        isAdmin,
         isMember,
         members: members.results || [],
     });
 });
-
-// 加入小组时记录动态
-async function recordActivity(db: D1Database, groupId: number, userId: number, type: string, content: string) {
-    // type     图标	 触发时机    内容示例
-    // create	✨      创建小组    "Admin 创建了小组"
-    // join	    👋      加入小组  	"Dragon 加入了小组"
-    // share	📤      分享句子	"Dragon 分享了一个句子：..."
-    // like	    ❤️      点赞句子   	"Alice 点赞了 Dragon 的句子"
-    // review	📚      完成复习    "Dragon 完成了今日复习（5 个）"
-    // leave	🚪     
-    //  退出小组  	"Bob 退出了小组"
-    await db.prepare(
-        `INSERT INTO group_activities (group_id, user_id, type, content) 
-     VALUES (?, ?, ?, ?)`
-    ).bind(groupId, userId, type, content).run();
-}
-
-// 更新小组成员
-async function recordMember(db: D1Database, groupId: number, userId: number, type: string) {
-    // 添加成员
-    await db.prepare(
-        `INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)`
-    ).bind(groupId, userId, type).run();
-    if (type != 'owner') {
-        // 更新成员数
-        await db.prepare(
-            'UPDATE groups SET member_count = member_count + 1 WHERE id = ?'
-        ).bind(groupId).run();
-
-    }
-
-}
 
 groupRoutes.get('/:id/activities', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
@@ -200,35 +213,64 @@ groupRoutes.get('/:id/activities', async (c) => {
     return c.json(activities.results || []);
 });
 
+// 转让小组接口
+groupRoutes.post('/:id/transfer', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
-//todo 转让群主逻辑
-// async function transferOwnership(db: D1Database, groupId: number, oldOwnerId: number, newOwnerId: number) {
-//     // 1. 更新 groups 表的 owner_id
-//     await db.prepare(
-//         'UPDATE groups SET owner_id = ? WHERE id = ?'
-//     ).bind(newOwnerId, groupId).run();
+    const groupId = Number(c.req.param('id'));
 
-//     // 2. 更新成员角色
-//     await db.prepare(
-//         "UPDATE group_members SET role = 'admin' WHERE group_id = ? AND user_id = ?"
-//     ).bind(groupId, oldOwnerId).run();
+    // ✅ 正确获取 body
+    const { newOwnerId } = await c.req.json();
+    if (!newOwnerId) return c.json({ error: '请选择新组长' }, 400);
 
-//     await db.prepare(
-//         "UPDATE group_members SET role = 'owner' WHERE group_id = ? AND user_id = ?"
-//     ).bind(groupId, newOwnerId).run();
+    // 1. 获取小组
+    const group = await c.env.DB.prepare(
+        'SELECT owner_id FROM groups WHERE id = ?'
+    ).bind(groupId).first<{ owner_id: number }>();
+    if (!group) return c.json({ error: '小组不存在' }, 404);
 
-//     // 3. 查昵称
-//     const oldUser = await db.prepare('SELECT nickname FROM users WHERE id = ?').bind(oldOwnerId).first<any>();
-//     const newUser = await db.prepare('SELECT nickname FROM users WHERE id = ?').bind(newOwnerId).first<any>();
-//     const oldName = oldUser?.nickname || '用户';
-//     const newName = newUser?.nickname || '用户';
+    // 2. ✅ 验证当前用户是组长
+    if (group.owner_id !== auth.userId) {
+        return c.json({ error: '只有组长可以转让' }, 403);
+    }
 
-//     // 4. 记录动态
-//     await db.prepare(
-//         `INSERT INTO group_activities (group_id, user_id, type, content)
-//      VALUES (?, ?, 'owner', ?)`
-//     ).bind(groupId, oldOwnerId, `${oldName} 将群主转让给 ${newName}`).run();
-// }
+    // 3. ✅ 验证新组长是小组的成员
+    const newOwner = await c.env.DB.prepare(
+        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(groupId, newOwnerId).first();
+    if (!newOwner) {
+        return c.json({ error: '目标用户不是小组成员' }, 400);
+    }
+
+    // 4. ✅ 不能转让给自己
+    if (newOwnerId === auth.userId) {
+        return c.json({ error: '不能转让给自己' }, 400);
+    }
+
+    transferOwnership(c.env.DB, groupId, auth.userId, Number(newOwnerId));
+});
+
+// 转让小组逻辑
+async function transferOwnership(db: D1Database, groupId: number, oldOwnerId: number, newOwnerId: number) {
+    // 1. 更新 groups 表的 owner_id
+    await db.prepare(
+        'UPDATE groups SET owner_id = ? WHERE id = ?'
+    ).bind(newOwnerId, groupId).run();
+
+    // 2. 更新成员角色
+    await db.prepare(
+        "UPDATE group_members SET role = 'admin' WHERE group_id = ? AND user_id = ?"
+    ).bind(groupId, oldOwnerId).run();
+
+    await db.prepare(
+        "UPDATE group_members SET role = 'owner' WHERE group_id = ? AND user_id = ?"
+    ).bind(groupId, newOwnerId).run();
+
+    // 3. 记录动态
+    recordActivity(db, groupId, newOwnerId, 'transfer', `转让了小组给`, oldOwnerId);
+
+}
 
 //todo 移除成员
 // await db.prepare(
@@ -242,14 +284,14 @@ groupRoutes.delete('/:id', async (c) => {
 
     const id = Number(c.req.param('id'));
 
-    // 验证是否为创建者
+    // 验证是否为组长
     const group = await c.env.DB.prepare(
         'SELECT owner_id FROM groups WHERE id = ?'
     ).bind(id).first<{ owner_id: number }>();
 
     if (!group) return c.json({ error: '小组不存在' }, 404);
     if (group.owner_id !== auth.userId) {
-        return c.json({ error: '只有创建者可以解散小组' }, 403);
+        return c.json({ error: '只有组长可以解散小组' }, 403);
     }
 
     // 级联删除（依赖外键 ON DELETE CASCADE）
@@ -257,3 +299,93 @@ groupRoutes.delete('/:id', async (c) => {
 
     return c.json({ success: true });
 });
+
+// 更新小组信息
+groupRoutes.put('/:id', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const id = Number(c.req.param('id'));
+    const { name, description, isPublic } = await c.req.json();
+
+    // 验证是否为组长
+    const group = await c.env.DB.prepare(
+        'SELECT owner_id FROM groups WHERE id = ?'
+    ).bind(id).first<{ owner_id: number }>();
+
+    if (!group) return c.json({ error: '小组不存在' }, 404);
+    if (group.owner_id !== auth.userId) {
+        return c.json({ error: '只有组长可以修改小组信息' }, 403);
+    }
+
+    // 动态拼接更新字段
+    const updates: string[] = [];
+    const params: any[] = [];
+
+    if (name !== undefined) {
+        if (name.length < 2) return c.json({ error: '小组名称至少2个字符' }, 400);
+        updates.push('name = ?');
+        params.push(name.trim());
+    }
+    if (description !== undefined) {
+        updates.push('description = ?');
+        params.push(description.trim());
+    }
+    if (isPublic !== undefined) {
+        updates.push('is_public = ?');
+        params.push(isPublic ? 1 : 0);
+    }
+
+    if (updates.length === 0) {
+        return c.json({ error: '没有需要更新的字段' }, 400);
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(id);
+
+    await c.env.DB.prepare(
+        `UPDATE groups SET ${updates.join(', ')} WHERE id = ?`
+    ).bind(...params).run();
+
+    return c.json({ success: true });
+});
+
+// 加入小组时记录动态
+async function recordActivity(
+    db: D1Database,
+    groupId: number,
+    userId: number,        // 操作人
+    type: string,
+    content: string,        // 动作描述，如 "加入了小组"
+    targetUserId?: number  // ✅ 被操作人（可选）
+) {
+    // type     图标	 触发时机    内容示例
+    // create	✨      创建小组    "Admin 创建了小组"
+    // join	    👋      加入小组  	"Dragon 加入了小组"
+    // share	📤      分享句子	"Dragon 分享了一个句子：..."
+    // like	    ❤️      点赞句子   	"Alice 点赞了 Dragon 的句子"
+    // review	📚      完成复习    "Dragon 完成了今日复习（5 个）"
+    // leave	🚪     
+    // transfer	👑      转让小组    "Alice 转让了小组给 Bob"
+    //  退出小组  	"Bob 退出了小组"
+    await db.prepare(
+        `INSERT INTO group_activities (group_id, user_id, type, content, target_user_id) 
+     VALUES (?, ?, ?, ?, ?)`
+    ).bind(groupId, userId, type, content, targetUserId || null).run();
+}
+
+// 更新小组成员
+async function recordMember(db: D1Database, groupId: number, userId: number, type: string) {
+    // 添加成员
+    await db.prepare(
+        `INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)`
+    ).bind(groupId, userId, type).run();
+    if (type != 'owner') {
+        // 更新成员数
+        await db.prepare(
+            'UPDATE groups SET member_count = member_count + 1 WHERE id = ?'
+        ).bind(groupId).run();
+
+    }
+
+}
