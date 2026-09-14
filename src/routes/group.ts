@@ -280,11 +280,117 @@ async function transferOwnership(db: D1Database, groupId: number, oldOwnerId: nu
 
 }
 
-//todo 移除成员
-// await db.prepare(
-//     `INSERT INTO group_activities (group_id, user_id, type, content)
-//    VALUES (?, ?, 'kick', ?)`
-// ).bind(groupId, auth.userId, `${adminName} 移除了 ${removedName}`).run();
+// 移除成员
+groupRoutes.post('/:id/kick', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+
+    try {
+        const { userId } = await c.req.json();
+        if (!userId) return c.json({ error: '请选择要移除的成员' }, 400);
+
+        // 1. 查小组
+        const group = await c.env.DB.prepare(
+            'SELECT owner_id FROM groups WHERE id = ?'
+        ).bind(groupId).first<{ owner_id: number }>();
+
+        if (!group) return c.json({ error: '小组不存在' }, 404);
+
+        // 2. 检查操作权限：组长 or 管理员
+        const operator = await c.env.DB.prepare(
+            'SELECT role FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, auth.userId).first<{ role: string }>();
+
+        const isOwner = group.owner_id === auth.userId;
+        const isAdmin = operator?.role === 'admin';
+
+        if (!isOwner && !isAdmin) {
+            return c.json({ error: '没有权限移除成员' }, 403);
+        }
+
+        // 3. 不能移除组长
+        if (userId === group.owner_id) {
+            return c.json({ error: '不能移除组长' }, 400);
+        }
+
+        // 4. 管理员不能移除其他管理员
+        const target = await c.env.DB.prepare(
+            'SELECT role FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, userId).first<{ role: string }>();
+
+        if (!target) return c.json({ error: '目标用户不是小组成员' }, 400);
+        if (target.role === 'admin' && !isOwner) {
+            return c.json({ error: '管理员不能移除其他管理员' }, 403);
+        }
+
+        // 5. 移除成员
+        await c.env.DB.prepare(
+            'DELETE FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, userId).run();
+
+        await c.env.DB.prepare(
+            'UPDATE groups SET member_count = member_count - 1 WHERE id = ?'
+        ).bind(groupId).run();
+        
+        await recordActivity(
+            c.env.DB,
+            groupId,
+            auth.userId,
+            'kick',
+            '移除了成员',
+            userId
+        );
+
+        return c.json({ success: true });
+    } catch (err: any) {
+        console.error('移除成员失败:', err);
+        return c.json({ error: err.message || '移除失败' }, 500);
+    }
+});
+
+// 退出小组
+groupRoutes.post('/:id/leave', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+
+    // 1. 查小组
+    const group = await c.env.DB.prepare(
+        'SELECT owner_id FROM groups WHERE id = ?'
+    ).bind(groupId).first<{ owner_id: number }>();
+
+    if (!group) return c.json({ error: '小组不存在' }, 404);
+
+    // 2. 组长不能退出（必须先转让或解散）
+    if (group.owner_id === auth.userId) {
+        return c.json({ error: '组长不能退出小组，请先转让组长或解散小组' }, 400);
+    }
+
+    // 3. 检查是否为成员
+    const member = await c.env.DB.prepare(
+        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(groupId, auth.userId).first();
+
+    if (!member) return c.json({ error: '你不是该小组成员' }, 400);
+
+    // 4. 删除成员记录
+    await c.env.DB.prepare(
+        'DELETE FROM group_members WHERE group_id = ? AND user_id = ?'
+    ).bind(groupId, auth.userId).run();
+
+    // 5. 更新成员数
+    await c.env.DB.prepare(
+        'UPDATE groups SET member_count = member_count - 1 WHERE id = ?'
+    ).bind(groupId).run();
+
+    // 6. 记录动态
+    await recordActivity(c.env.DB, groupId, auth.userId, 'leave', '退出了小组');
+
+    return c.json({ success: true });
+});
 
 groupRoutes.delete('/:id', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
