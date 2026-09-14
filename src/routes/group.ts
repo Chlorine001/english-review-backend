@@ -34,6 +34,26 @@ groupRoutes.post('/', async (c) => {
     return c.json({ id: group.id, inviteCode });
 });
 
+groupRoutes.get('/open', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groups = await c.env.DB.prepare(
+        `SELECT 
+       g.*,
+       (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) as member_count,
+       EXISTS(
+         SELECT 1 FROM group_members 
+         WHERE group_id = g.id AND user_id = ?
+       ) as is_member
+     FROM groups g
+     WHERE g.is_public = 1
+     ORDER BY g.created_at DESC
+     LIMIT 50`
+    ).bind(auth.userId).all();
+
+    return c.json(groups.results || []);
+});
 
 groupRoutes.get('/mine', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
