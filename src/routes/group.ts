@@ -205,7 +205,7 @@ groupRoutes.get('/:id/activities', async (c) => {
 
 //     // 4. 记录动态
 //     await db.prepare(
-//         `INSERT INTO group_activities (group_id, user_id, type, content) 
+//         `INSERT INTO group_activities (group_id, user_id, type, content)
 //      VALUES (?, ?, 'owner', ?)`
 //     ).bind(groupId, oldOwnerId, `${oldName} 将群主转让给 ${newName}`).run();
 // }
@@ -215,3 +215,25 @@ groupRoutes.get('/:id/activities', async (c) => {
 //     `INSERT INTO group_activities (group_id, user_id, type, content)
 //    VALUES (?, ?, 'kick', ?)`
 // ).bind(groupId, auth.userId, `${adminName} 移除了 ${removedName}`).run();
+
+groupRoutes.delete('/:id', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const id = Number(c.req.param('id'));
+
+    // 验证是否为创建者
+    const group = await c.env.DB.prepare(
+        'SELECT owner_id FROM groups WHERE id = ?'
+    ).bind(id).first<{ owner_id: number }>();
+
+    if (!group) return c.json({ error: '小组不存在' }, 404);
+    if (group.owner_id !== auth.userId) {
+        return c.json({ error: '只有创建者可以解散小组' }, 403);
+    }
+
+    // 级联删除（依赖外键 ON DELETE CASCADE）
+    await c.env.DB.prepare('DELETE FROM groups WHERE id = ?').bind(id).run();
+
+    return c.json({ success: true });
+});
