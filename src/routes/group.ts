@@ -333,7 +333,7 @@ groupRoutes.post('/:id/kick', async (c) => {
         await c.env.DB.prepare(
             'UPDATE groups SET member_count = member_count - 1 WHERE id = ?'
         ).bind(groupId).run();
-        
+
         await recordActivity(
             c.env.DB,
             groupId,
@@ -390,6 +390,64 @@ groupRoutes.post('/:id/leave', async (c) => {
     await recordActivity(c.env.DB, groupId, auth.userId, 'leave', '退出了小组');
 
     return c.json({ success: true });
+});
+
+// 设置/取消管理员
+groupRoutes.post('/:id/set-admin', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+
+    try {
+        const { userId, isAdmin } = await c.req.json();
+        if (!userId) return c.json({ error: '请选择成员' }, 400);
+
+        // 1. 查小组
+        const group = await c.env.DB.prepare(
+            'SELECT owner_id FROM groups WHERE id = ?'
+        ).bind(groupId).first<{ owner_id: number }>();
+
+        if (!group) return c.json({ error: '小组不存在' }, 404);
+
+        // 2. 只有组长可以设置管理员
+        if (group.owner_id !== auth.userId) {
+            return c.json({ error: '只有组长可以设置管理员' }, 403);
+        }
+
+        // 3. 不能设置组长自己
+        if (userId === group.owner_id) {
+            return c.json({ error: '组长不能设置为管理员' }, 400);
+        }
+
+        // 4. 检查目标用户是成员
+        const target = await c.env.DB.prepare(
+            'SELECT role FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, userId).first<{ role: string }>();
+
+        if (!target) return c.json({ error: '目标用户不是小组成员' }, 400);
+
+        // 5. 更新角色
+        const newRole = isAdmin ? 'admin' : 'member';
+        await c.env.DB.prepare(
+            'UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?'
+        ).bind(newRole, groupId, userId).run();
+
+        // 6. 记录动态
+        await recordActivity(
+            c.env.DB,
+            groupId,
+            auth.userId,
+            'set_admin',
+            isAdmin ? '设置' : '取消' + '了管理员',
+            userId,
+        );
+
+        return c.json({ success: true, role: newRole });
+    } catch (err: any) {
+        console.error('设置管理员失败:', err);
+        return c.json({ error: err.message || '设置失败' }, 500);
+    }
 });
 
 groupRoutes.delete('/:id', async (c) => {
