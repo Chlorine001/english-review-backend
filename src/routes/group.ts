@@ -198,16 +198,19 @@ groupRoutes.get('/:id/activities', async (c) => {
 
     const activities = await c.env.DB.prepare(
         `SELECT
-            ga.id,
-            ga.type,
-            ga.content,
-            ga.created_at,
-            COALESCE(u.nickname, u.email) as user_nickname
-        FROM group_activities ga
-        JOIN users u ON ga.user_id = u.id
-        WHERE ga.group_id = ?
-        ORDER BY ga.created_at DESC
-        LIMIT 50`
+       ga.id,
+       ga.type,
+       ga.content,
+       ga.created_at,
+       ga.target_user_id,
+       COALESCE(u.nickname, u.email) as user_nickname,
+       COALESCE(t.nickname, t.email) as target_user_nickname
+     FROM group_activities ga
+     JOIN users u ON ga.user_id = u.id
+     LEFT JOIN users t ON ga.target_user_id = t.id
+     WHERE ga.group_id = ?
+     ORDER BY ga.created_at DESC
+     LIMIT 50`
     ).bind(groupId).all();
 
     return c.json(activities.results || []);
