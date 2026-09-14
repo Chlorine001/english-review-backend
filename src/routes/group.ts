@@ -219,36 +219,41 @@ groupRoutes.post('/:id/transfer', async (c) => {
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
     const groupId = Number(c.req.param('id'));
+    try {
+        // ✅ 正确获取 body
+        const { newOwnerId } = await c.req.json();
+        if (!newOwnerId) return c.json({ error: '请选择新组长' }, 400);
 
-    // ✅ 正确获取 body
-    const { newOwnerId } = await c.req.json();
-    if (!newOwnerId) return c.json({ error: '请选择新组长' }, 400);
+        // 1. 获取小组
+        const group = await c.env.DB.prepare(
+            'SELECT owner_id FROM groups WHERE id = ?'
+        ).bind(groupId).first<{ owner_id: number }>();
+        if (!group) return c.json({ error: '小组不存在' }, 404);
 
-    // 1. 获取小组
-    const group = await c.env.DB.prepare(
-        'SELECT owner_id FROM groups WHERE id = ?'
-    ).bind(groupId).first<{ owner_id: number }>();
-    if (!group) return c.json({ error: '小组不存在' }, 404);
+        // 2. ✅ 验证当前用户是组长
+        if (group.owner_id !== auth.userId) {
+            return c.json({ error: '只有组长可以转让' }, 403);
+        }
 
-    // 2. ✅ 验证当前用户是组长
-    if (group.owner_id !== auth.userId) {
-        return c.json({ error: '只有组长可以转让' }, 403);
+        // 3. ✅ 验证新组长是小组的成员
+        const newOwner = await c.env.DB.prepare(
+            'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, newOwnerId).first();
+        if (!newOwner) {
+            return c.json({ error: '目标用户不是小组成员' }, 400);
+        }
+
+        // 4. ✅ 不能转让给自己
+        if (newOwnerId === auth.userId) {
+            return c.json({ error: '不能转让给自己' }, 400);
+        }
+
+        transferOwnership(c.env.DB, groupId, auth.userId, Number(newOwnerId));
+        return c.json({ success: true });
+    } catch (err: any) {
+        console.error('转让失败:', err);
+        return c.json({ error: err.message || '转让失败' }, 500);  // ✅ 捕获异常并返回
     }
-
-    // 3. ✅ 验证新组长是小组的成员
-    const newOwner = await c.env.DB.prepare(
-        'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
-    ).bind(groupId, newOwnerId).first();
-    if (!newOwner) {
-        return c.json({ error: '目标用户不是小组成员' }, 400);
-    }
-
-    // 4. ✅ 不能转让给自己
-    if (newOwnerId === auth.userId) {
-        return c.json({ error: '不能转让给自己' }, 400);
-    }
-
-    transferOwnership(c.env.DB, groupId, auth.userId, Number(newOwnerId));
 });
 
 // 转让小组逻辑
