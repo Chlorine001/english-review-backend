@@ -1,6 +1,6 @@
 -- ========== 小组索引优化 ==========
 
--- groups 表：按创建者查询、按邀请码查询
+-- groups 表：按组长查询、按邀请码查询
 CREATE INDEX IF NOT EXISTS idx_groups_owner ON groups(owner_id);
 CREATE INDEX IF NOT EXISTS idx_groups_invite_code ON groups(invite_code);
 CREATE INDEX IF NOT EXISTS idx_groups_created_at ON groups(created_at DESC);

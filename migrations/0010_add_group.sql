@@ -3,7 +3,7 @@ CREATE TABLE groups (
   name TEXT NOT NULL,
   description TEXT,
   avatar TEXT,
-  owner_id INTEGER NOT NULL,          -- 创建者
+  owner_id INTEGER NOT NULL,          -- 组长
   invite_code TEXT UNIQUE NOT NULL,   -- 邀请码
   is_public BOOLEAN DEFAULT 1,        -- 是否公开
   max_members INTEGER DEFAULT 20,     -- 最大成员数
