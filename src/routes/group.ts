@@ -1,8 +1,8 @@
 import { authenticate } from '../utils/auth';
 import { Hono } from 'hono';
 import { generateGroupCode } from '../utils/code';
-import { Bindings } from '../types/bindings';
-export const groupRoutes = new Hono<{ Bindings: Bindings }>();
+import { groupBindings } from '../types/bindings';
+export const groupRoutes = new Hono<{ Bindings: groupBindings }>();
 
 groupRoutes.post('/', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
@@ -715,3 +715,114 @@ async function recordMember(db: D1Database, groupId: number, userId: number, typ
     }
 
 }
+
+// 复制小组句子到个人句子库
+groupRoutes.post('/:id/sentences/:shareId/copy', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+    const shareId = Number(c.req.param('shareId'));
+
+    try {
+        // 1. 查分享记录 + 原句子内容
+        const share = await c.env.DB.prepare(
+            `SELECT 
+         gs.id,
+         gs.sentence_id,
+         s.content,
+         s.translation,
+         s.pronunciation,
+         s.notes,
+         s.source,
+         s.media_path,
+         s.media_format,
+         s.media_original_name
+       FROM group_sentences gs
+       JOIN sentences s ON gs.sentence_id = s.id
+       WHERE gs.id = ? AND gs.group_id = ?`
+        ).bind(shareId, groupId).first<{
+            id: number;
+            sentence_id: number;
+            content: string;
+            translation: string | null;
+            pronunciation: string | null;
+            notes: string | null;
+            source: string | null;
+            media_path: string | null;
+            media_format: string | null;
+            media_original_name: string | null;
+        }>();
+
+        if (!share) return c.json({ error: '分享记录不存在' }, 404);
+
+        // 2. 检查是否已复制
+        const existing = await c.env.DB.prepare(
+            'SELECT id FROM sentences WHERE user_id = ? AND content = ? LIMIT 1'
+        ).bind(auth.userId, share.content).first();
+
+        if (existing) {
+            return c.json({ error: '你的句子库中已有相同句子', code: 'ALREADY_EXISTS' }, 400);
+        }
+
+        // 3. ✅ 处理媒体：如果有媒体，复制 R2 文件（独立存储）
+        let newMediaPath = share.media_path;
+
+        if (share.media_path) {
+            try {
+                // 从 R2 获取原文件
+                const object = await c.env.R2_BUCKET.get(share.media_path);
+
+                if (object) {
+                    // 生成新路径（用时间戳 + 随机数避免冲突）
+                    const ext = share.media_format || 'bin';
+                    const random = Math.random().toString(36).substring(2, 8);
+                    newMediaPath = `sentences/copy-${Date.now()}-${random}.${ext}`;
+
+                    // 上传到新路径
+                    await c.env.R2_BUCKET.put(newMediaPath, object.body, {
+                        httpMetadata: object.httpMetadata,
+                    });
+                } else {
+                    // 原文件不存在，不复制媒体
+                    newMediaPath = null;
+                }
+            } catch (err) {
+                console.error('复制媒体失败:', err);
+                newMediaPath = null;
+            }
+        }
+
+        // 4. ✅ 插入到个人句子表（完整 SQL）
+        const result = await c.env.DB.prepare(
+            `INSERT INTO sentences 
+       (user_id, content, translation, pronunciation, notes, source, media_path, media_format, media_original_name) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        ).bind(
+            auth.userId,
+            share.content,
+            share.translation || '',
+            share.pronunciation || '',
+            share.notes || '',
+            share.source || '',
+            newMediaPath,                       // ✅ 用新的媒体路径
+            newMediaPath ? share.media_format : null,
+            newMediaPath ? share.media_original_name : null
+        ).first<{ id: number }>();
+
+        if (!result) {
+            return c.json({ error: '复制失败' }, 500);
+        }
+
+        // 5. 创建复习记录
+        const now = new Date().toISOString();
+        await c.env.DB.prepare(
+            'INSERT INTO reviews (sentence_id, user_id, status, next_review_at) VALUES (?, ?, ?, ?)'
+        ).bind(result.id, auth.userId, 'NEW', now).run();
+
+        return c.json({ success: true, id: result.id });
+    } catch (err: any) {
+        console.error('复制句子失败:', err);
+        return c.json({ error: err.message || '复制失败' }, 500);
+    }
+});
