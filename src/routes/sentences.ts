@@ -122,7 +122,7 @@ sentenceRoutes.get('/', async (c) => {
 });
 
 // ---------- 删除句子 ----------
-sentenceRoutes.delete('/api/sentences/:id', async (c) => {
+sentenceRoutes.delete('/:id', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
@@ -137,7 +137,7 @@ sentenceRoutes.delete('/api/sentences/:id', async (c) => {
 });
 
 //上传音频
-sentenceRoutes.post('/api/sentences/:id/media', async (c) => {
+sentenceRoutes.post('/:id/media', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
@@ -182,7 +182,6 @@ sentenceRoutes.post('/api/sentences/:id/media', async (c) => {
 
         httpMetadata: { contentType: mimeMap[ext || ''] || 'application/octet-stream' },
     });
-
     // 更新数据库
     await c.env.DB.prepare(
         'UPDATE sentences SET media_path = ?, media_format = ?, media_original_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
@@ -191,17 +190,38 @@ sentenceRoutes.post('/api/sentences/:id/media', async (c) => {
     return c.json({ success: true, path: path, originalName: originalName });
 });
 
-sentenceRoutes.get('/api/sentences/:id/media', async (c) => {
+sentenceRoutes.get('/:id/media', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 
     const id = Number(c.req.param('id'));
+    // 1. 查句子
     const sentence = await c.env.DB.prepare(
-        'SELECT media_path FROM sentences WHERE id = ? AND user_id = ?'
-    ).bind(id, auth.userId).first<{ media_path: string }>();
+        'SELECT user_id, media_path, media_format FROM sentences WHERE id = ?'
+    ).bind(id).first<{ user_id: number; media_path: string | null; media_format: string | null }>();
 
     if (!sentence || !sentence.media_path) {
         return c.json({ error: 'Media not found' }, 404);
+    }
+
+    // 2. 权限判断：本人 OR 同小组的成员
+    const isOwner = sentence.user_id === auth.userId;
+
+    let hasGroupAccess = false;
+    if (!isOwner) {
+        // 检查当前用户和目标句子作者是否在同一个小组
+        const sharedGroup = await c.env.DB.prepare(
+            `SELECT 1 
+       FROM group_sentences gs
+       JOIN group_members gm ON gs.group_id = gm.group_id
+       WHERE gs.sentence_id = ? AND gm.user_id = ?
+       LIMIT 1`
+        ).bind(id, auth.userId).first();
+        hasGroupAccess = !!sharedGroup;
+    }
+
+    if (!isOwner && !hasGroupAccess) {
+        return c.json({ error: '无权访问' }, 403);
     }
 
     const object = await c.env.R2_BUCKET.get(sentence.media_path);
@@ -228,7 +248,7 @@ sentenceRoutes.get('/api/sentences/:id/media', async (c) => {
 });
 
 // ---------- 删除音频 ----------
-sentenceRoutes.delete('/api/sentences/:id/media', async (c) => {
+sentenceRoutes.delete('/:id/media', async (c) => {
     const auth = await authenticate(c.req.raw, c.env);
     if (!auth) return c.json({ error: 'Unauthorized' }, 401);
 

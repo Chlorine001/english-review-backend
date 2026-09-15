@@ -60,6 +60,10 @@ export class PointsService {
        WHERE user_id = ? 
        ORDER BY created_at DESC 
        LIMIT ?`
+//              SELECT * FROM points_log 
+// WHERE user_id = ?
+//             AND DATE(created_at, '+8 hours') >= DATE('now', '+8 hours', '-7 days')
+// ORDER BY created_at DESC
         ).bind(userId, limit).all();
 
         return logs.results || [];

@@ -1,6 +1,6 @@
 import { authenticate } from '../utils/auth';
 import { Hono } from 'hono';
-import{ generateInviteCode}from'../utils/code';
+import { generateInviteCode } from '../utils/code';
 import { inviteBindings } from '../types/bindings';
 import { requireVerified } from '../utils/verify';
 
@@ -22,16 +22,14 @@ invitationRoutes.get('/my-link', async (c) => {
 
   // 如果没有，则创建
   if (!invite) {
+    const code = generateInviteCode(auth.userId);
+    await c.env.DB.prepare(
+      'INSERT INTO invitations (user_id, code) VALUES (?, ?)'
+    ).bind(auth.userId, code).run();
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const code = generateInviteCode(auth.userId);
-      await c.env.DB.prepare(
-        'INSERT INTO invitations (user_id, code) VALUES (?, ?)'
-      ).bind(auth.userId, code).run();
-
       invite = await c.env.DB.prepare(
         'SELECT id, code, created_at FROM invitations WHERE user_id = ?'
       ).bind(auth.userId).first();
-
       if (invite) {
         break;
       }

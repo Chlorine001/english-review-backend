@@ -19,3 +19,7 @@ export interface mediaBindings extends Bindings {
     R2_BUCKET: R2Bucket;
     MAX_FILE_SIZE?: string;
 }
+
+export interface groupBindings extends Bindings {
+    R2_BUCKET: R2Bucket;
+}

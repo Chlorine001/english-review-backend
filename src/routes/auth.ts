@@ -106,20 +106,18 @@ authRoutes.post('/login', zValidator('json', registerSchema), async (c) => {
         expiresInMinutes
     );
 
-    // 每日首次登录积分
+    // 每日首次登录积分(北京时间)
     const service = new PointsService(c.env.DB);
-    const today = new Date().toISOString().slice(0, 10);
-    const hasToday = await c.env.DB.prepare(
-        'SELECT id FROM points_log WHERE user_id = ? AND type = "daily_login" AND DATE(created_at) = ?'
-    ).bind(user.id, today).first();
 
-    if (!hasToday) {
-        await service.addPoints(
-            user.id,
-            1,
-            'daily_login',
-            '每日登录奖励'
-        );
+    const todayCheck = await c.env.DB.prepare(
+        `SELECT id FROM points_log 
+     WHERE user_id = ? 
+     AND type = 'daily_login' 
+     AND DATE(created_at, '+8 hours') = DATE('now', '+8 hours')`
+    ).bind(user.id).first();
+
+    if (!todayCheck) {
+        await service.addPoints(user.id, 1, 'daily_login', '每日登录奖励');
     }
 
     // 返回 JSON 同时设置 HttpOnly Cookie
