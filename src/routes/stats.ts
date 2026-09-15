@@ -69,3 +69,63 @@ statsRoutes.get('/invitations', async (c) => {
         records: records.results || []
     });
 });
+// backend/src/routes/stats.ts 或 index.ts
+
+statsRoutes.get('/progress', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    // 1. 各状态数量
+    const statusCounts = await c.env.DB.prepare(
+        `SELECT status, COUNT(*) as count 
+     FROM reviews 
+     WHERE user_id = ? 
+     GROUP BY status`
+    ).bind(auth.userId).all();
+
+    // 2. 总数
+    const total = await c.env.DB.prepare(
+        'SELECT COUNT(*) as count FROM sentences WHERE user_id = ?'
+    ).bind(auth.userId).first<{ count: number }>();
+
+    // 3. 今日待复习 / 已完成
+    const now = new Date().toISOString();
+    const todayPending = await c.env.DB.prepare(
+        `SELECT COUNT(*) as count FROM reviews 
+     WHERE user_id = ? AND next_review_at <= ? AND status != 'MATURE'`
+    ).bind(auth.userId, now).first<{ count: number }>();
+
+    // 今日已完成（今天有复习记录的）
+    const todayDone = await c.env.DB.prepare(
+        `SELECT COUNT(*) as count FROM reviews 
+     WHERE user_id = ? AND DATE(last_review_at) = DATE('now')`
+    ).bind(auth.userId).first<{ count: number }>();
+
+    // 4. 连续学习天数（Streak）
+    const streak = await c.env.DB.prepare(
+        `SELECT COUNT(DISTINCT DATE(created_at)) as days 
+     FROM points_log 
+     WHERE user_id = ? AND type = 'daily_login' 
+     AND created_at >= datetime('now', '-30 days')`
+    ).bind(auth.userId).first<{ days: number }>();
+
+    // 5. 组装结果
+    const statusMap: Record<string, number> = {
+        NEW: 0,
+        LEARNING: 0,
+        REVIEW: 0,
+        MATURE: 0,
+    };
+
+    (statusCounts.results || []).forEach((row: any) => {
+        statusMap[row.status] = row.count;
+    });
+
+    return c.json({
+        total: total?.count || 0,
+        byStatus: statusMap,
+        todayPending: todayPending?.count || 0,
+        todayDone: todayDone?.count || 0,
+        streak: streak?.days || 0,
+    });
+});
