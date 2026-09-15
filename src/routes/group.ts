@@ -28,7 +28,6 @@ groupRoutes.post('/', async (c) => {
         throw new Error('创建小组失败，请稍后重试！');
     }
     recordMember(c.env.DB, group.id, auth.userId, 'owner')
-
     recordActivity(c.env.DB, group.id, auth.userId, 'create', `创建了小组！`);
 
     return c.json({ id: group.id, inviteCode });
