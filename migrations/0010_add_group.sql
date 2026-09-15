@@ -30,15 +30,12 @@ CREATE TABLE group_sentences (
   group_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,            -- 贡献者
   sentence_id INTEGER NOT NULL,        -- 引用的原始句子
-  content TEXT NOT NULL,
-  translation TEXT,
-  pronunciation TEXT,
-  source TEXT,
   likes INTEGER DEFAULT 0,             -- 点赞数
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (sentence_id) REFERENCES sentences(id) ON DELETE CASCADE
+  UNIQUE(group_id, sentence_id)       -- 同一句子在同一小组只能分享一次
 );
 
 CREATE TABLE group_activities (
