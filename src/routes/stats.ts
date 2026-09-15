@@ -106,7 +106,7 @@ statsRoutes.get('/progress', async (c) => {
         `SELECT COUNT(*) as count 
      FROM reviews 
      WHERE user_id = ? 
-     AND DATE(last_review_at) = DATE('now')`
+     AND DATE(last_review_at, '+8 hours') = DATE('now', '+8 hours')`
     ).bind(auth.userId).first<{ count: number }>();
 
     const hasReviewedToday = (todayCheck?.count || 0) > 0;
@@ -147,7 +147,7 @@ statsRoutes.get('/progress', async (c) => {
 async function calculateStreak(db: D1Database, userId: number): Promise<number> {
     // 1. 获取所有学习日期（去重，倒序）
     const result = await db.prepare(
-        `SELECT DISTINCT DATE(last_review_at) as day
+        `SELECT DISTINCT DATE(last_review_at, '+8 hours') as day
      FROM reviews
      WHERE user_id = ? AND last_review_at IS NOT NULL
      ORDER BY day DESC
