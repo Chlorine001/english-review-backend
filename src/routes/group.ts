@@ -334,6 +334,10 @@ groupRoutes.post('/:id/kick', async (c) => {
             'UPDATE groups SET member_count = member_count - 1 WHERE id = ?'
         ).bind(groupId).run();
 
+        await c.env.DB.prepare(
+            'DELETE FROM group_sentences WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, userId).run();
+
         await recordActivity(
             c.env.DB,
             groupId,
@@ -385,6 +389,10 @@ groupRoutes.post('/:id/leave', async (c) => {
     await c.env.DB.prepare(
         'UPDATE groups SET member_count = member_count - 1 WHERE id = ?'
     ).bind(groupId).run();
+
+    await c.env.DB.prepare(
+        'DELETE FROM group_sentences WHERE group_id = ? AND user_id = ?'
+    ).bind(groupId, auth.userId).run();
 
     // 6. 记录动态
     await recordActivity(c.env.DB, groupId, auth.userId, 'leave', '退出了小组');
@@ -518,6 +526,152 @@ groupRoutes.put('/:id', async (c) => {
     await c.env.DB.prepare(
         `UPDATE groups SET ${updates.join(', ')} WHERE id = ?`
     ).bind(...params).run();
+
+    return c.json({ success: true });
+});
+
+groupRoutes.get('/:id/sentences', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+
+    const sentences = await c.env.DB.prepare(
+        `SELECT 
+       gs.id,
+       gs.sentence_id,
+       gs.likes,
+       gs.created_at,
+       gs.user_id,
+       s.content,
+       s.translation,
+       s.pronunciation,
+       s.source,
+       s.media_path,
+       s.media_format,
+       s.media_original_name,
+       COALESCE(u.nickname, u.email) as user_nickname
+     FROM group_sentences gs
+     JOIN sentences s ON gs.sentence_id = s.id
+     JOIN users u ON gs.user_id = u.id
+     WHERE gs.group_id = ?
+     ORDER BY gs.created_at DESC
+     LIMIT 100`
+    ).bind(groupId).all();
+
+    return c.json(sentences.results || []);
+});
+
+groupRoutes.post('/:id/sentences', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+
+    try {
+        const { sentenceId } = await c.req.json();
+        if (!sentenceId) return c.json({ error: '请选择要分享的句子' }, 400);
+
+        // 1. 验证是成员
+        const member = await c.env.DB.prepare(
+            'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?'
+        ).bind(groupId, auth.userId).first();
+        if (!member) return c.json({ error: '你不是该小组成员' }, 403);
+
+        // 2. 验证句子属于当前用户
+        const sentence = await c.env.DB.prepare(
+            'SELECT id, content FROM sentences WHERE id = ? AND user_id = ?'
+        ).bind(sentenceId, auth.userId).first<{ id: number; content: string }>();
+        if (!sentence) return c.json({ error: '句子不存在' }, 404);
+
+        // 3. 检查是否已分享（UNIQUE 约束会兜底，但先查更友好）
+        const existing = await c.env.DB.prepare(
+            'SELECT id FROM group_sentences WHERE group_id = ? AND sentence_id = ?'
+        ).bind(groupId, sentenceId).first();
+        if (existing) return c.json({ error: '该句子已分享到小组' }, 400);
+
+        // 4. 插入引用
+        const result = await c.env.DB.prepare(
+            `INSERT INTO group_sentences (group_id, user_id, sentence_id) 
+       VALUES (?, ?, ?) RETURNING id`
+        ).bind(groupId, auth.userId, sentenceId).first<{ id: number }>();
+
+        // 5. 记录动态
+        await recordActivity(
+            c.env.DB,
+            groupId,
+            auth.userId,
+            'share',
+            `分享了句子："${sentence.content.slice(0, 20)}${sentence.content.length > 20 ? '...' : ''}"`
+        );
+
+        return c.json({ success: true, id: result?.id });
+    } catch (err: any) {
+        // UNIQUE 约束兜底
+        if (err.message?.includes('UNIQUE constraint failed')) {
+            return c.json({ error: '该句子已分享到小组' }, 400);
+        }
+        console.error('分享句子失败:', err);
+        return c.json({ error: err.message || '分享失败' }, 500);
+    }
+});
+
+groupRoutes.delete('/:id/sentences/:shareId', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+    const shareId = Number(c.req.param('shareId'));
+
+    try {
+        // 1. 查分享记录（同时拿到原句子内容，用于动态描述）
+        const share = await c.env.DB.prepare(
+            `SELECT gs.id, gs.user_id, s.content
+       FROM group_sentences gs
+       JOIN sentences s ON gs.sentence_id = s.id
+       WHERE gs.id = ? AND gs.group_id = ?`
+        ).bind(shareId, groupId).first<{ id: number; user_id: number; content: string }>();
+
+        if (!share) return c.json({ error: '分享记录不存在' }, 404);
+
+        // 2. 只能删自己的
+        if (share.user_id !== auth.userId) {
+            return c.json({ error: '只能删除自己分享的句子' }, 403);
+        }
+
+        // 3. 删除引用
+        await c.env.DB.prepare(
+            'DELETE FROM group_sentences WHERE id = ?'
+        ).bind(shareId).run();
+
+        // 4. ✅ 记录动态
+        await recordActivity(
+            c.env.DB,
+            groupId,
+            auth.userId,
+            'unshare',
+            `取消分享了句子："${share.content.slice(0, 20)}${share.content.length > 20 ? '...' : ''}"`
+        );
+
+        return c.json({ success: true });
+    } catch (err: any) {
+        console.error('删除分享失败:', err);
+        return c.json({ error: err.message || '删除失败' }, 500);
+    }
+});
+
+// 点赞/取消点赞
+groupRoutes.post('/:id/sentences/:sentenceId/like', async (c) => {
+    const auth = await authenticate(c.req.raw, c.env);
+    if (!auth) return c.json({ error: 'Unauthorized' }, 401);
+
+    const groupId = Number(c.req.param('id'));
+    const sentenceId = Number(c.req.param('sentenceId'));
+
+    // 简化：直接 +1（如果需要精确控制，可以加 likes 表）
+    await c.env.DB.prepare(
+        'UPDATE group_sentences SET likes = likes + 1 WHERE id = ? AND group_id = ?'
+    ).bind(sentenceId, groupId).run();
 
     return c.json({ success: true });
 });
