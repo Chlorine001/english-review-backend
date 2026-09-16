@@ -27,8 +27,8 @@ groupRoutes.post('/', async (c) => {
     if (!group) {
         throw new Error('创建小组失败，请稍后重试！');
     }
-    recordMember(c.env.DB, group.id, auth.userId, 'owner')
-    recordActivity(c.env.DB, group.id, auth.userId, 'create', `创建了小组！`);
+    await recordMember(c.env.DB, group.id, auth.userId, 'owner')
+    await recordActivity(c.env.DB, group.id, auth.userId, 'create', `创建了小组！`);
 
     return c.json({ id: group.id, inviteCode });
 });
@@ -96,9 +96,9 @@ groupRoutes.post('/join', async (c) => {
 
     if (existing) return c.json({ error: '已加入该小组' }, 400);
 
-    recordMember(c.env.DB, group.id, auth.userId, 'member')
+    await recordMember(c.env.DB, group.id, auth.userId, 'member')
     // 记录动态
-    recordActivity(c.env.DB, group.id, auth.userId, 'join', `通过邀请码加入了小组！`);
+    await recordActivity(c.env.DB, group.id, auth.userId, 'join', `通过邀请码加入了小组！`);
 
     return c.json({ success: true, groupId: group.id });
 });
@@ -275,7 +275,7 @@ async function transferOwnership(db: D1Database, groupId: number, oldOwnerId: nu
     ).bind(groupId, newOwnerId).run();
 
     // 3. 记录动态
-    recordActivity(db, groupId, newOwnerId, 'transfer', `转让了小组给`, oldOwnerId);
+    await recordActivity(db, groupId, newOwnerId, 'transfer', `转让了小组给`, oldOwnerId);
 
 }
 
