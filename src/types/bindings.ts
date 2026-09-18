@@ -23,3 +23,7 @@ export interface mediaBindings extends Bindings {
 export interface groupBindings extends Bindings {
     R2_BUCKET: R2Bucket;
 }
+
+export interface aiBindings extends mediaBindings {
+    AI: Ai;
+}

@@ -38,6 +38,7 @@ import { invitationRoutes } from './routes/invitations';
 import { pointsRoutes } from './routes/points';
 import { statsRoutes } from './routes/stats';
 import { groupRoutes } from './routes/group';
+import { aiRoutes } from './routes/ai';
 
 // 注册路由
 app.route('/api/auth', authRoutes);
@@ -48,5 +49,6 @@ app.route('/api/invitations', invitationRoutes);
 app.route('/api/points', pointsRoutes);
 app.route('/api/stats', statsRoutes);
 app.route('/api/groups', groupRoutes);
+app.route('/api/ai', aiRoutes);
 
 export default app;
